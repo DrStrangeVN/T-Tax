@@ -291,4 +291,8 @@ if (process.env.TTAX_NO_LISTEN !== "1") {
   })
 }
 
+export function closeWebServer(): void {
+  conn.close()
+}
+
 export { app }

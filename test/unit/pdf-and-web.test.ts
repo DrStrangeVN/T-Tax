@@ -55,69 +55,72 @@ describe("PDF Renderer (Zero Ghostscript), Tabular Import & Web Hono API", () =>
     const tmp = mkdtempSync(join(tmpdir(), "ttax-web-"))
     process.env.TTAX_DATA_DIR = tmp
     process.env.TTAX_NO_LISTEN = "1"
-    const { app } = await import("../../apps/web/src/server.js")
+    const { app, closeWebServer } = await import("../../apps/web/src/server.js")
 
-    const health = await app.request("/api/health")
-    expect(health.status).toBe(200)
-    expect(await health.json()).toEqual({ ok: true, service: "t-tax-web" })
+    try {
+      const health = await app.request("/api/health")
+      expect(health.status).toBe(200)
+      expect(await health.json()).toEqual({ ok: true, service: "t-tax-web" })
 
-    const wsRes = await app.request("/api/rpc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method: "listWorkspaces" })
-    })
-    expect(wsRes.status).toBe(200)
-    const wss = (await wsRes.json()) as Array<{ id: string; taxCode: string }>
-    expect(wss.length).toBeGreaterThanOrEqual(1)
-    const wsId = wss[0]!.id
-
-    const saveMail = await app.request("/api/rpc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        method: "saveEmailServer",
-        args: [
-          wsId,
-          {
-            name: "Demo IMAP",
-            provider: "gmail",
-            host: "imap.gmail.com",
-            port: 993,
-            secure: true,
-            username: "ketoan@ttax.vn",
-            password: "app-password-demo",
-            folder: "INBOX"
-          }
-        ]
+      const wsRes = await app.request("/api/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method: "listWorkspaces" })
       })
-    })
-    expect(saveMail.status).toBe(200)
+      expect(wsRes.status).toBe(200)
+      const wss = (await wsRes.json()) as Array<{ id: string; taxCode: string }>
+      expect(wss.length).toBeGreaterThanOrEqual(1)
+      const wsId = wss[0]!.id
 
-    const exp = await app.request("/api/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: wsId, kind: "htkk_in" })
-    })
-    expect(exp.status).toBe(200)
-    expect((await exp.arrayBuffer()).byteLength).toBeGreaterThan(1000)
+      const saveMail = await app.request("/api/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: "saveEmailServer",
+          args: [
+            wsId,
+            {
+              name: "Demo IMAP",
+              provider: "gmail",
+              host: "imap.gmail.com",
+              port: 993,
+              secure: true,
+              username: "ketoan@ttax.vn",
+              password: "app-password-demo",
+              folder: "INBOX"
+            }
+          ]
+        })
+      })
+      expect(saveMail.status).toBe(200)
 
-    const bak = await app.request("/api/backup/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: wsId })
-    })
-    expect(bak.status).toBe(200)
-    const bakB64 = Buffer.from(await bak.arrayBuffer()).toString("base64")
+      const exp = await app.request("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: wsId, kind: "htkk_in" })
+      })
+      expect(exp.status).toBe(200)
+      expect((await exp.arrayBuffer()).byteLength).toBeGreaterThan(1000)
 
-    const restoreRes = await app.request("/api/backup/restore", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ base64: bakB64 })
-    })
-    expect(restoreRes.status).toBe(200)
-    const restoreJson = (await restoreRes.json()) as { workspaceId: string }
-    expect(restoreJson.workspaceId).toBe(wsId)
+      const bak = await app.request("/api/backup/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: wsId })
+      })
+      expect(bak.status).toBe(200)
+      const bakB64 = Buffer.from(await bak.arrayBuffer()).toString("base64")
 
-    rmSync(tmp, { recursive: true, force: true })
+      const restoreRes = await app.request("/api/backup/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64: bakB64 })
+      })
+      expect(restoreRes.status).toBe(200)
+      const restoreJson = (await restoreRes.json()) as { workspaceId: string }
+      expect(restoreJson.workspaceId).toBe(wsId)
+    } finally {
+      closeWebServer()
+      rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+    }
   })
 })
