@@ -274,6 +274,8 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   posted_by TEXT NOT NULL DEFAULT 'auto_rule',
   created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 );
+CREATE INDEX IF NOT EXISTS je_ws_date_idx ON journal_entries(workspace_id, voucher_date);
+CREATE INDEX IF NOT EXISTS je_tx_idx ON journal_entries(transaction_id);
 
 CREATE TABLE IF NOT EXISTS journal_lines (
   id TEXT PRIMARY KEY,
@@ -285,6 +287,7 @@ CREATE TABLE IF NOT EXISTS journal_lines (
   tax_code TEXT,
   partner_tax_code TEXT
 );
+CREATE INDEX IF NOT EXISTS jl_entry_idx ON journal_lines(entry_id);
 
 CREATE TABLE IF NOT EXISTS bank_statements (
   id TEXT PRIMARY KEY,
@@ -302,6 +305,7 @@ CREATE TABLE IF NOT EXISTS bank_statements (
   match_status TEXT NOT NULL DEFAULT 'unmatched',
   created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 );
+CREATE INDEX IF NOT EXISTS bs_ws_date_idx ON bank_statements(workspace_id, tx_date);
 
 CREATE TABLE IF NOT EXISTS app_data (
   id TEXT PRIMARY KEY,

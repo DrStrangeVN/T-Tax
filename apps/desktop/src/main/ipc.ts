@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from "electron"
 import { randomUUID } from "node:crypto"
+import { basename, join } from "node:path"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
 import {
   authenticateGdtSession,
   downloadGdtInvoiceXmlZip,
@@ -20,7 +20,7 @@ import {
 import type { TTaxService } from "@t-tax/db"
 import type { SecretVault } from "./secrets.js"
 
-async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
+async function renderHtmlListToPdfBuffers(htmlList: string[]): Promise<Buffer[]> {
   const win = new BrowserWindow({
     show: false,
     width: 794,
@@ -28,17 +28,28 @@ async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
     webPreferences: { offscreen: true, sandbox: true }
   })
   try {
-    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-    const pdfBuf = await win.webContents.printToPDF({
-      printBackground: true,
-      pageSize: "A4",
-      margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 }
-    })
-    return Buffer.from(pdfBuf)
+    const out: Buffer[] = []
+    for (const html of htmlList) {
+      await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      const pdfBuf = await win.webContents.printToPDF({
+        printBackground: true,
+        pageSize: "A4",
+        margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 }
+      })
+      out.push(Buffer.from(pdfBuf))
+    }
+    return out
   } finally {
     if (!win.isDestroyed()) win.destroy()
   }
 }
+
+async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
+  const [buf] = await renderHtmlListToPdfBuffers([html])
+  return buf!
+}
+
+let batchCancelled = false
 
 export function registerIpcHandlers(params: {
   service: TTaxService
@@ -149,6 +160,18 @@ export function registerIpcHandlers(params: {
         params.onCountsChanged()
         return res
       }
+      case "ingestFilePaths": {
+        const wsId = args[0] as string
+        const paths = args[1] as string[]
+        const src = (args[2] as "upload" | "drop" | "email" | "gdt" | "tray") || "upload"
+        const res = await service.ingestFiles(
+          wsId,
+          paths.map((fp) => ({ filename: basename(fp), buffer: readFileSync(fp) })),
+          src
+        )
+        params.onCountsChanged()
+        return res
+      }
       case "listFiles":
         return service.listFiles(args[0] as string, { unreviewedOnly: Boolean(args[1]) })
       case "readFilePreview":
@@ -160,6 +183,33 @@ export function registerIpcHandlers(params: {
         const fileId = args[1] as string
         const providers = getDecryptedProviders(wsId)
         return service.analyzeFile(wsId, fileId, providers)
+      }
+      case "analyzeFilesBatch": {
+        const wsId = args[0] as string
+        const fileIds = args[1] as string[]
+        const providers = getDecryptedProviders(wsId)
+        batchCancelled = false
+        return service.analyzeFilesBatch(
+          wsId,
+          fileIds,
+          providers,
+          (ev) => {
+            const win = params.getMainWindow()
+            if (win && !win.isDestroyed()) {
+              win.webContents.send("ttax:batch-progress", ev)
+            }
+          },
+          () => batchCancelled
+        )
+      }
+      case "cancelBatchAnalyze": {
+        batchCancelled = true
+        return { ok: true }
+      }
+      case "batchApproveCleanXml": {
+        const res = await service.batchApproveCleanXml(args[0] as string, args[1] as string[])
+        params.onCountsChanged()
+        return res
       }
       case "approveFileToTransaction": {
         const res = await service.approveFileToTransaction(args[0] as string, args[1] as string, args[2] as never)
@@ -215,25 +265,34 @@ export function registerIpcHandlers(params: {
         if (folderRes.canceled || !folderRes.filePaths[0]) return { count: 0, canceled: true }
         const outDir = folderRes.filePaths[0]
         mkdirSync(outDir, { recursive: true })
-        for (const item of items) {
-          const buf = await renderHtmlToPdfBuffer(item.html)
-          writeFileSync(join(outDir, safeAsciiFilename(item.filename)), buf)
-        }
+        const bufs = await renderHtmlListToPdfBuffers(items.map((i) => i.html))
+        items.forEach((item, idx) => {
+          const b = bufs[idx]
+          if (b) writeFileSync(join(outDir, safeAsciiFilename(item.filename)), b)
+        })
         return { folderPath: outDir, count: items.length }
       }
 
       case "listTransactions":
         return service.listTransactions(args[0] as string, args[1] as never)
+      case "getTransactionDetail":
+        return service.getTransactionDetail(args[0] as string, args[1] as string)
       case "createTransaction":
         return service.createManualTransaction(args[0] as string, args[1] as never)
       case "updateTransaction":
-        return service.updateTransaction(args[0] as string, args[1] as string, args[2] as never)
+        return service.updateTransaction(args[0] as string, args[1] as string, args[2] as never, {
+          repostJournal: args[3] !== false
+        })
       case "bulkUpdateTransactions":
         return service.bulkUpdateTransactions(args[0] as string, args[1] as string[], args[2] as never)
       case "deleteTransactions":
         return service.deleteTransactions(args[0] as string, args[1] as string[])
       case "getDashboardStats":
         return service.getDashboardStats(args[0] as string, args[1] as string | undefined, args[2] as string | undefined)
+      case "getSidebarBadgeCounts":
+        return service.getSidebarBadgeCounts(args[0] as string)
+      case "searchGlobal":
+        return service.searchGlobal(args[0] as string, args[1] as string)
       case "lookupFxRate":
         return getHistoricalExchangeRate(
           args[1] as string,
@@ -243,7 +302,7 @@ export function registerIpcHandlers(params: {
         )
 
       case "listJournalEntries":
-        return service.listJournalEntries(args[0] as string)
+        return service.listJournalEntries(args[0] as string, args[1] as never)
       case "updateJournalLine":
         service.updateJournalLine(args[0] as string, args[1] as never)
         return
@@ -262,6 +321,9 @@ export function registerIpcHandlers(params: {
         return service.listBankStatements(args[0] as string)
       case "confirmBankMatch":
         service.confirmBankMatch(args[0] as string, args[1] as string, args[2] as string)
+        return
+      case "unmatchBankStatement":
+        service.unmatchBankStatement(args[0] as string, args[1] as string)
         return
 
       case "getAppData":

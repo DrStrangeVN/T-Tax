@@ -18,7 +18,7 @@ function getResourcePath(name: string): string {
 
 export function createTrayController(params: {
   preloadPath: string
-  rendererUrlOrFile: { url?: string; file?: string }
+  rendererUrlOrFile: { url?: string; file?: string; trayUrl?: string; trayFile?: string }
   service: TTaxService
   getMainWindow: () => BrowserWindow | null
 }): TrayController {
@@ -56,7 +56,11 @@ export function createTrayController(params: {
     }
   })
 
-  if (params.rendererUrlOrFile.url) {
+  if (params.rendererUrlOrFile.trayUrl) {
+    popover.loadURL(params.rendererUrlOrFile.trayUrl)
+  } else if (params.rendererUrlOrFile.trayFile) {
+    popover.loadFile(params.rendererUrlOrFile.trayFile, { query: { view: "tray" } })
+  } else if (params.rendererUrlOrFile.url) {
     popover.loadURL(`${params.rendererUrlOrFile.url}?view=tray`)
   } else if (params.rendererUrlOrFile.file) {
     popover.loadFile(params.rendererUrlOrFile.file, { query: { view: "tray" } })

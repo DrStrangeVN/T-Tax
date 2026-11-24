@@ -2,6 +2,7 @@ import React, { createContext, useContext } from "react"
 import type {
   AccountingRegime,
   AuditIssue,
+  BatchAnalyzeProgressEvent,
   DocumentAnalysisOutcome,
   GdtCaptchaChallenge,
   GdtInvoiceSummary,
@@ -10,6 +11,7 @@ import type {
   OutgoingInvoiceTemplateData,
   ParsedEInvoice,
   TransactionDirection,
+  WorkspaceBadgeCounts,
   WorkspaceDTO,
   XmlSignatureVerification
 } from "@t-tax/core"
@@ -38,6 +40,14 @@ export interface TTaxTransport {
   windowAction?: (action: "minimize" | "maximize" | "close" | "open-main") => Promise<void>
   onNativeThemeChange?: (cb: (info: { shouldUseDarkColors: boolean; reduceTransparency: boolean }) => void) => () => void
   onFilesDroppedFromTray?: (cb: () => void) => () => void
+  onBatchAnalyzeProgress?: (cb: (ev: BatchAnalyzeProgressEvent) => void) => () => void
+  onMenuCommand?: (cb: (cmd: string) => void) => () => void
+  getNativeFilePaths?: (files: File[]) => string[]
+  ingestFilePaths?: (
+    workspaceId: string,
+    filePaths: string[],
+    source?: "upload" | "drop" | "email" | "gdt" | "tray"
+  ) => Promise<{ createdFiles: Array<Record<string, unknown>>; skippedDuplicates: string[] }>
 
   // Workspaces
   listWorkspaces: () => Promise<WorkspaceDTO[]>
@@ -86,6 +96,9 @@ export interface TTaxTransport {
   }>
   renderXmlHtmlPreview: (workspaceId: string, fileId: string) => Promise<string>
   analyzeFile: (workspaceId: string, fileId: string) => Promise<DocumentAnalysisOutcome>
+  analyzeFilesBatch: (workspaceId: string, fileIds: string[]) => Promise<{ jobId: string; done: number; total: number; cancelled: boolean }>
+  cancelBatchAnalyze: () => Promise<void>
+  batchApproveCleanXml: (workspaceId: string, fileIds: string[]) => Promise<{ approved: number; skipped: number }>
   approveFileToTransaction: (workspaceId: string, fileId: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>
   splitFileItems: (workspaceId: string, fileId: string, items: LineItemDTO[], baseMeta: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>
   deleteFile: (workspaceId: string, fileId: string) => Promise<boolean>
@@ -96,22 +109,33 @@ export interface TTaxTransport {
   saveBatchPdfsFromHtml: (items: Array<{ filename: string; html: string }>) => Promise<{ folderPath?: string; count: number; canceled?: boolean }>
 
   // Transactions & Dashboard
-  listTransactions: (workspaceId: string, filters?: Record<string, unknown>) => Promise<{ rows: Array<Record<string, unknown>>; total: number }>
+  listTransactions: (workspaceId: string, filters?: Record<string, unknown>) => Promise<{
+    rows: Array<Record<string, unknown>>
+    total: number
+    summary?: { preTaxSum: number; vatSum: number; totalSum: number }
+  }>
+  getTransactionDetail: (workspaceId: string, id: string) => Promise<Record<string, unknown> | null>
   createTransaction: (workspaceId: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>
-  updateTransaction: (workspaceId: string, id: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>
+  updateTransaction: (workspaceId: string, id: string, patch: Record<string, unknown>, repostJournal?: boolean) => Promise<Record<string, unknown>>
   bulkUpdateTransactions: (workspaceId: string, ids: string[], patch: Record<string, unknown>) => Promise<number>
   deleteTransactions: (workspaceId: string, ids: string[]) => Promise<number>
   getDashboardStats: (workspaceId: string, dateFrom?: string, dateTo?: string) => Promise<Record<string, unknown>>
+  getSidebarBadgeCounts: (workspaceId: string) => Promise<WorkspaceBadgeCounts>
+  searchGlobal: (workspaceId: string, query: string) => Promise<{
+    transactions: Array<Record<string, unknown>>
+    counterparties: Array<Record<string, unknown>>
+  }>
   lookupFxRate: (workspaceId: string, from: string, to: string, date: string) => Promise<{ rate: string; source: string; rateDate: string; cached: boolean }>
 
   // Accounting, Counterparties & Bank
-  listJournalEntries: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
+  listJournalEntries: (workspaceId: string, opts?: { dateFrom?: string; dateTo?: string; limit?: number }) => Promise<Array<Record<string, unknown>>>
   updateJournalLine: (lineId: string, patch: Record<string, unknown>) => Promise<void>
   listCounterparties: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
   refreshCounterpartyRisk: (workspaceId: string, taxCode: string) => Promise<Record<string, unknown>>
   importBankStatement: (workspaceId: string, filename: string, base64: string, bankCode: string) => Promise<Record<string, unknown>>
   listBankStatements: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
   confirmBankMatch: (workspaceId: string, statementId: string, transactionId: string) => Promise<void>
+  unmatchBankStatement: (workspaceId: string, statementId: string) => Promise<void>
 
   // Mini-Apps & Import/Export/Backup
   getAppData: (workspaceId: string, app: string) => Promise<Record<string, unknown>>
@@ -161,6 +185,21 @@ export function useTransport(): TTaxTransport {
   const ctx = useContext(TransportContext)
   if (!ctx) throw new Error("useTransport must be used inside TransportProvider")
   return ctx
+}
+
+export async function smartIngestFileList(
+  transport: TTaxTransport,
+  workspaceId: string,
+  fileList: FileList | File[],
+  source: "upload" | "drop" | "email" | "gdt" | "tray" = "upload"
+) {
+  const arr = Array.from(fileList)
+  const paths = transport.getNativeFilePaths?.(arr) ?? []
+  if (transport.ingestFilePaths && paths.length === arr.length && paths.every((p) => Boolean(p))) {
+    return transport.ingestFilePaths(workspaceId, paths, source)
+  }
+  const payloads = await Promise.all(arr.map(fileToPayload))
+  return transport.ingestFiles(workspaceId, payloads, source)
 }
 
 export async function fileToPayload(file: File): Promise<IngestFilePayload> {
@@ -240,6 +279,11 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     readFilePreview: (wsId, fileId) => post("/rpc", { method: "readFilePreview", args: [wsId, fileId] }),
     renderXmlHtmlPreview: (wsId, fileId) => post("/rpc", { method: "renderXmlHtmlPreview", args: [wsId, fileId] }),
     analyzeFile: (wsId, fileId) => post("/rpc", { method: "analyzeFile", args: [wsId, fileId] }),
+    analyzeFilesBatch: (wsId, fileIds) => post("/rpc", { method: "analyzeFilesBatch", args: [wsId, fileIds] }),
+    cancelBatchAnalyze: async () => {
+      await post("/rpc", { method: "cancelBatchAnalyze", args: [] })
+    },
+    batchApproveCleanXml: (wsId, fileIds) => post("/rpc", { method: "batchApproveCleanXml", args: [wsId, fileIds] }),
     approveFileToTransaction: (wsId, fileId, input) => post("/rpc", { method: "approveFileToTransaction", args: [wsId, fileId, input] }),
     splitFileItems: (wsId, fileId, items, meta) => post("/rpc", { method: "splitFileItems", args: [wsId, fileId, items, meta] }),
     deleteFile: (wsId, fileId) => post("/rpc", { method: "deleteFile", args: [wsId, fileId] }),
@@ -273,19 +317,23 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
       return { folderPath: "Trình duyệt In PDF", count: items.length }
     },
     listTransactions: (wsId, filters) => post("/rpc", { method: "listTransactions", args: [wsId, filters] }),
+    getTransactionDetail: (wsId, id) => post("/rpc", { method: "getTransactionDetail", args: [wsId, id] }),
     createTransaction: (wsId, input) => post("/rpc", { method: "createTransaction", args: [wsId, input] }),
-    updateTransaction: (wsId, id, patch) => post("/rpc", { method: "updateTransaction", args: [wsId, id, patch] }),
+    updateTransaction: (wsId, id, patch, repost) => post("/rpc", { method: "updateTransaction", args: [wsId, id, patch, repost] }),
     bulkUpdateTransactions: (wsId, ids, patch) => post("/rpc", { method: "bulkUpdateTransactions", args: [wsId, ids, patch] }),
     deleteTransactions: (wsId, ids) => post("/rpc", { method: "deleteTransactions", args: [wsId, ids] }),
     getDashboardStats: (wsId, from, to) => post("/rpc", { method: "getDashboardStats", args: [wsId, from, to] }),
+    getSidebarBadgeCounts: (wsId) => post("/rpc", { method: "getSidebarBadgeCounts", args: [wsId] }),
+    searchGlobal: (wsId, q) => post("/rpc", { method: "searchGlobal", args: [wsId, q] }),
     lookupFxRate: (wsId, from, to, date) => post("/rpc", { method: "lookupFxRate", args: [wsId, from, to, date] }),
-    listJournalEntries: (wsId) => post("/rpc", { method: "listJournalEntries", args: [wsId] }),
+    listJournalEntries: (wsId, opts) => post("/rpc", { method: "listJournalEntries", args: [wsId, opts] }),
     updateJournalLine: (id, patch) => post("/rpc", { method: "updateJournalLine", args: [id, patch] }),
     listCounterparties: (wsId) => post("/rpc", { method: "listCounterparties", args: [wsId] }),
     refreshCounterpartyRisk: (wsId, mst) => post("/rpc", { method: "refreshCounterpartyRisk", args: [wsId, mst] }),
     importBankStatement: (wsId, fname, b64, code) => post("/rpc", { method: "importBankStatement", args: [wsId, fname, b64, code] }),
     listBankStatements: (wsId) => post("/rpc", { method: "listBankStatements", args: [wsId] }),
     confirmBankMatch: (wsId, sid, tid) => post("/rpc", { method: "confirmBankMatch", args: [wsId, sid, tid] }),
+    unmatchBankStatement: (wsId, sid) => post("/rpc", { method: "unmatchBankStatement", args: [wsId, sid] }),
     getAppData: (wsId, app) => post("/rpc", { method: "getAppData", args: [wsId, app] }),
     saveAppData: (wsId, app, d) => post("/rpc", { method: "saveAppData", args: [wsId, app, d] }),
     saveEmailServer: (wsId, srv) => post("/rpc", { method: "saveEmailServer", args: [wsId, srv] }),

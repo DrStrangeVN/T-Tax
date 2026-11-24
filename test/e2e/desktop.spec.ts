@@ -129,17 +129,30 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await page.click('button:has-text("Duyệt & Ghi sổ")')
     await expect(page.locator("text=Hộp thư chứng từ đang sạch")).toBeVisible({ timeout: 10_000 })
 
-    // 5. Verify Transaction Ledger
+    // 5. Verify Transaction Ledger, Summary Footer & 3-Tab Right Inspector
     await page.click('[data-nav="transactions"]')
     await expect(page.locator("text=00004321")).toBeVisible({ timeout: 10_000 })
     await expect(page.locator("text=0312000111")).toBeVisible()
+    await expect(page.locator("text=Tổng bộ lọc:")).toBeVisible()
+    await page.locator("text=00004321").first().click()
+    await expect(page.locator('button:has-text("Chi tiết & Định khoản")')).toBeVisible({ timeout: 10_000 })
+    await page.click('button:has-text("Mặt hàng & Cảnh báo")')
+    await expect(page.getByText("Thuê bản quyền T-Tax Enterprise", { exact: true })).toBeVisible({ timeout: 10_000 })
+    await page.keyboard.press("Escape")
     await page.screenshot({ path: join(shotDir, "04-transactions-ledger.png") })
 
-    // 6. Verify Accounting VAS Journal Entry created automatically
+    // 6. Verify Accounting VAS Journal Entry, Balance Pill & 2-Pane Bank Tab
     await page.click('[data-nav="accounting"]')
     await expect(page.locator("h1")).toContainText("Kế toán", { timeout: 10_000 })
     await expect(page.locator('input[value="1331"]').first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator("text=∑Nợ = ∑Có")).toBeVisible()
     await page.screenshot({ path: join(shotDir, "05-accounting-vas.png") })
+
+    // Test Command Palette FTS5 Search after tx committed
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k")
+    await page.locator('.pal input[type="text"], .pal input:not([type])').first().fill("00004321")
+    await expect(page.locator('.pal >> text=00004321').first()).toBeVisible({ timeout: 5_000 })
+    await page.keyboard.press("Escape")
 
     // 7. Batch Converter XML scan & preview
     await page.click('[data-nav="converter"]')

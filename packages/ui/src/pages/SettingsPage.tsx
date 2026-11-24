@@ -3,7 +3,9 @@ import { Plus, Trash2, CheckCircle2, Download, Upload, TestTube2 } from "lucide-
 import {
   LLM_PROVIDER_PRESETS,
   REGIME_METADATA,
+  VIETNAM_BANKS,
   type AccountingRegime,
+  type BankDetails,
   type GlassIntensity,
   type LLMProviderConfig,
   type WorkspaceDTO
@@ -12,6 +14,7 @@ import { useTransport } from "../transport/client.js"
 
 interface SettingsProps {
   workspace: WorkspaceDTO
+  openNewWsSignal?: number
   onWorkspaceUpdated: () => void
   isLight: boolean
   setIsLight: (v: boolean) => void
@@ -24,6 +27,7 @@ interface SettingsProps {
 
 export function SettingsPage({
   workspace,
+  openNewWsSignal,
   onWorkspaceUpdated,
   isLight,
   setIsLight,
@@ -34,7 +38,9 @@ export function SettingsPage({
   onToast
 }: SettingsProps) {
   const transport = useTransport()
-  const [tab, setTab] = useState<"workspace" | "ai" | "categories" | "fields" | "appearance" | "backup">("workspace")
+  const [tab, setTab] = useState<"workspace" | "ai" | "categories" | "projects" | "fields" | "appearance" | "backup">(
+    "workspace"
+  )
 
   const [wsForm, setWsForm] = useState({
     name: workspace.name,
@@ -44,6 +50,13 @@ export function SettingsPage({
     baseCurrency: workspace.baseCurrency,
     address: workspace.address ?? ""
   })
+  const [bankForm, setBankForm] = useState<BankDetails>({
+    bankBin: workspace.bankDetails?.bankBin || "970436",
+    bankName: workspace.bankDetails?.bankName || "Vietcombank",
+    accountNo: workspace.bankDetails?.accountNo || "",
+    accountName: workspace.bankDetails?.accountName || workspace.name
+  })
+
   const [newWsModal, setNewWsModal] = useState(false)
   const [newWsForm, setNewWsForm] = useState({
     name: "",
@@ -55,16 +68,28 @@ export function SettingsPage({
   const [providers, setProviders] = useState<LLMProviderConfig[]>([])
   const [settingsMap, setSettingsMap] = useState<Record<string, string>>({})
   const [categories, setCategories] = useState<Array<Record<string, unknown>>>([])
+  const [projects, setProjects] = useState<Array<Record<string, unknown>>>([])
   const [fields, setFields] = useState<Array<Record<string, unknown>>>([])
+
   const [newCat, setNewCat] = useState({ code: "", name: "", color: "#2563EB", defaultDebitAccount: "6427", llmPrompt: "" })
+  const [newProject, setNewProject] = useState({ code: "", name: "", color: "#0EA5E9", llmPrompt: "" })
   const [newField, setNewField] = useState({ code: "", name: "", type: "string", llmPrompt: "" })
   const [testingProvider, setTestingProvider] = useState<string | null>(null)
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (openNewWsSignal && openNewWsSignal > 0) {
+      setTab("workspace")
+      setNewWsModal(true)
+    }
+  }, [openNewWsSignal])
 
   const loadAll = useCallback(async () => {
-    const [s, p, cats, flds] = await Promise.all([
+    const [s, p, cats, projs, flds] = await Promise.all([
       transport.getSettings(workspace.id),
       transport.getLLMProviders(workspace.id),
       transport.listCategories(workspace.id),
+      transport.listProjects(workspace.id),
       transport.listFields(workspace.id)
     ])
     setSettingsMap(s)
@@ -83,6 +108,7 @@ export function SettingsPage({
       )
     }
     setCategories(cats)
+    setProjects(projs)
     setFields(flds)
   }, [workspace.id, transport])
 
@@ -96,12 +122,21 @@ export function SettingsPage({
       baseCurrency: workspace.baseCurrency,
       address: workspace.address ?? ""
     })
+    setBankForm({
+      bankBin: workspace.bankDetails?.bankBin || "970436",
+      bankName: workspace.bankDetails?.bankName || "Vietcombank",
+      accountNo: workspace.bankDetails?.accountNo || "",
+      accountName: workspace.bankDetails?.accountName || workspace.name
+    })
   }, [workspace, loadAll])
 
   const saveWorkspace = async () => {
-    await transport.updateWorkspace(workspace.id, wsForm)
+    await transport.updateWorkspace(workspace.id, {
+      ...wsForm,
+      bankDetails: (bankForm.accountNo ?? "").trim() ? bankForm : null
+    })
     onWorkspaceUpdated()
-    onToast("Đã cập nhật thông tin Công ty / Chế độ kế toán.", "ok")
+    onToast("Đã cập nhật thông tin Công ty, Chế độ KT & Tài khoản VietQR.", "ok")
   }
 
   const createWorkspace = async (e: React.FormEvent) => {
@@ -129,14 +164,42 @@ export function SettingsPage({
     }
   }
 
+  const renderDeleteGuard = (key: string, onConfirmed: () => Promise<void>) => {
+    if (confirmDeleteKey === key) {
+      return (
+        <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[var(--rose-s)] border border-[var(--rose)]/35 text-[11px]">
+          <button
+            type="button"
+            onClick={async () => {
+              await onConfirmed()
+              setConfirmDeleteKey(null)
+            }}
+            className="font-semibold text-[var(--rose)] hover:underline"
+          >
+            Xóa
+          </button>
+          <button type="button" onClick={() => setConfirmDeleteKey(null)} className="text-[var(--muted)]">
+            Hủy
+          </button>
+        </div>
+      )
+    }
+    return (
+      <button type="button" onClick={() => setConfirmDeleteKey(key)} className="text-[var(--rose)] hover:opacity-80">
+        <Trash2 size={13.5} />
+      </button>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col">
-      <div className="px-5 py-3 border-b border-[var(--line)] bg-[var(--sheet-bg)] overflow-x-auto">
+      <div className="px-5 py-3 border-b border-[var(--line)] bg-[var(--sheet-bg)] overflow-x-auto shrink-0">
         <div className="seg">
           {[
             { id: "workspace", label: "Công ty & Chế độ KT" },
             { id: "ai", label: "AI & Prompt" },
             { id: "categories", label: "Danh mục" },
+            { id: "projects", label: "Dự án" },
             { id: "fields", label: "Trường tùy chỉnh" },
             { id: "appearance", label: "Liquid Glass" },
             { id: "backup", label: "Sao lưu ZIP" }
@@ -145,7 +208,10 @@ export function SettingsPage({
               key={t.id}
               type="button"
               className={tab === t.id ? "on" : ""}
-              onClick={() => setTab(t.id as typeof tab)}
+              onClick={() => {
+                setTab(t.id as typeof tab)
+                setConfirmDeleteKey(null)
+              }}
             >
               {t.label}
             </button>
@@ -213,7 +279,55 @@ export function SettingsPage({
                   className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]"
                 />
               </div>
-              <div className="sm:col-span-2 flex justify-end">
+            </div>
+
+            {/* VietQR Default Bank Details */}
+            <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
+              <div>
+                <div className="text-[13px] font-semibold">Tài khoản Ngân hàng mặc định (VietQR)</div>
+                <div className="text-[11px] text-[var(--muted)]">Tự động điền vào Trình tạo Hóa đơn & QR thanh toán của công ty</div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] text-[var(--muted)] mb-1">Ngân hàng (NAPAS BIN)</label>
+                  <select
+                    value={bankForm.bankBin}
+                    onChange={(e) => {
+                      const bank = VIETNAM_BANKS.find((b) => b.bin === e.target.value)
+                      setBankForm({
+                        ...bankForm,
+                        bankBin: e.target.value,
+                        bankName: bank?.shortName ?? ""
+                      })
+                    }}
+                    className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]"
+                  >
+                    {VIETNAM_BANKS.map((b) => (
+                      <option key={b.bin} value={b.bin} className="bg-[var(--panel-solid)]">
+                        {b.shortName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-[var(--muted)] mb-1">Số tài khoản</label>
+                  <input
+                    value={bankForm.accountNo}
+                    onChange={(e) => setBankForm({ ...bankForm, accountNo: e.target.value })}
+                    placeholder="VD: 1018889999"
+                    className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px] tnum"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-[var(--muted)] mb-1">Chủ tài khoản</label>
+                  <input
+                    value={bankForm.accountName}
+                    onChange={(e) => setBankForm({ ...bankForm, accountName: e.target.value })}
+                    className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end pt-1">
                 <button type="button" onClick={saveWorkspace} className="pb">
                   <CheckCircle2 size={13.5} />
                   <span>Lưu thay đổi</span>
@@ -325,9 +439,24 @@ export function SettingsPage({
         {tab === "categories" && (
           <div className="space-y-4">
             <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 grid grid-cols-1 sm:grid-cols-5 gap-2">
-              <input placeholder="Mã (vd: marketing)" value={newCat.code} onChange={(e) => setNewCat({ ...newCat, code: e.target.value })} className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]" />
-              <input placeholder="Tên danh mục" value={newCat.name} onChange={(e) => setNewCat({ ...newCat, name: e.target.value })} className="sm:col-span-2 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]" />
-              <input placeholder="TK Nợ mặc định" value={newCat.defaultDebitAccount} onChange={(e) => setNewCat({ ...newCat, defaultDebitAccount: e.target.value })} className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum" />
+              <input
+                placeholder="Mã (vd: marketing)"
+                value={newCat.code}
+                onChange={(e) => setNewCat({ ...newCat, code: e.target.value })}
+                className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
+              <input
+                placeholder="Tên danh mục"
+                value={newCat.name}
+                onChange={(e) => setNewCat({ ...newCat, name: e.target.value })}
+                className="sm:col-span-2 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
+              <input
+                placeholder="TK Nợ mặc định"
+                value={newCat.defaultDebitAccount}
+                onChange={(e) => setNewCat({ ...newCat, defaultDebitAccount: e.target.value })}
+                className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
+              />
               <button
                 type="button"
                 onClick={async () => {
@@ -342,23 +471,77 @@ export function SettingsPage({
               </button>
             </div>
             <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] divide-y divide-[var(--line)]">
-              {categories.map((c) => (
-                <div key={String(c.id)} className="px-4 py-2.5 flex items-center justify-between text-[12.5px]">
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: String(c.color) }} />
-                    <span className="font-medium">{String(c.name)}</span>
-                    <span className="tag font-mono">{String(c.code)}</span>
-                    <span className="tag tnum">TK {String(c.defaultDebitAccount ?? "6428")}</span>
+              {categories.map((c) => {
+                const cid = String(c.id)
+                return (
+                  <div key={cid} className="px-4 py-2.5 flex items-center justify-between text-[12.5px]">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: String(c.color) }} />
+                      <span className="font-medium">{String(c.name)}</span>
+                      <span className="tag font-mono">{String(c.code)}</span>
+                      <span className="tag tnum">TK {String(c.defaultDebitAccount ?? "6428")}</span>
+                    </div>
+                    {renderDeleteGuard(`cat:${cid}`, async () => {
+                      setCategories(await transport.deleteCategory(workspace.id, cid))
+                    })}
                   </div>
-                  <button
-                    type="button"
-                    onClick={async () => setCategories(await transport.deleteCategory(workspace.id, String(c.id)))}
-                    className="text-[var(--rose)] hover:opacity-80"
-                  >
-                    <Trash2 size={13.5} />
-                  </button>
-                </div>
-              ))}
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab === "projects" && (
+          <div className="space-y-4">
+            <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 grid grid-cols-1 sm:grid-cols-5 gap-2">
+              <input
+                placeholder="Mã dự án (vd: hn_2026)"
+                value={newProject.code}
+                onChange={(e) => setNewProject({ ...newProject, code: e.target.value })}
+                className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
+              <input
+                placeholder="Tên dự án / Bộ phận"
+                value={newProject.name}
+                onChange={(e) => setNewProject({ ...newProject, name: e.target.value })}
+                className="sm:col-span-2 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
+              <input
+                placeholder="Gợi ý phân loại AI..."
+                value={newProject.llmPrompt}
+                onChange={(e) => setNewProject({ ...newProject, llmPrompt: e.target.value })}
+                className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!newProject.code || !newProject.name) return
+                  const next = await transport.upsertProject(workspace.id, newProject)
+                  setProjects(next)
+                  setNewProject({ code: "", name: "", color: "#0EA5E9", llmPrompt: "" })
+                }}
+                className="pb justify-center"
+              >
+                Thêm dự án
+              </button>
+            </div>
+
+            <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] divide-y divide-[var(--line)]">
+              {projects.map((p) => {
+                const pid = String(p.id)
+                return (
+                  <div key={pid} className="px-4 py-2.5 flex items-center justify-between text-[12.5px]">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: String(p.color ?? "#0EA5E9") }} />
+                      <span className="font-medium truncate">{String(p.name)}</span>
+                      <span className="tag font-mono shrink-0">{String(p.code)}</span>
+                    </div>
+                    {renderDeleteGuard(`proj:${pid}`, async () => {
+                      setProjects(await transport.deleteProject(workspace.id, pid))
+                    })}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}
@@ -366,14 +549,34 @@ export function SettingsPage({
         {tab === "fields" && (
           <div className="space-y-4">
             <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 grid grid-cols-1 sm:grid-cols-5 gap-2">
-              <input placeholder="Mã trường (vd: so_hop_dong)" value={newField.code} onChange={(e) => setNewField({ ...newField, code: e.target.value })} className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]" />
-              <input placeholder="Tên hiển thị" value={newField.name} onChange={(e) => setNewField({ ...newField, name: e.target.value })} className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]" />
-              <input placeholder="Prompt cho AI trích xuất..." value={newField.llmPrompt} onChange={(e) => setNewField({ ...newField, llmPrompt: e.target.value })} className="sm:col-span-2 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]" />
+              <input
+                placeholder="Mã trường (vd: so_hop_dong)"
+                value={newField.code}
+                onChange={(e) => setNewField({ ...newField, code: e.target.value })}
+                className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
+              <input
+                placeholder="Tên hiển thị"
+                value={newField.name}
+                onChange={(e) => setNewField({ ...newField, name: e.target.value })}
+                className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
+              <input
+                placeholder="Prompt cho AI trích xuất..."
+                value={newField.llmPrompt}
+                onChange={(e) => setNewField({ ...newField, llmPrompt: e.target.value })}
+                className="sm:col-span-2 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+              />
               <button
                 type="button"
                 onClick={async () => {
                   if (!newField.code || !newField.name) return
-                  const next = await transport.upsertField(workspace.id, { ...newField, isExtra: true, isVisibleInList: true, isVisibleInAnalysis: true })
+                  const next = await transport.upsertField(workspace.id, {
+                    ...newField,
+                    isExtra: true,
+                    isVisibleInList: true,
+                    isVisibleInAnalysis: true
+                  })
                   setFields(next)
                   setNewField({ code: "", name: "", type: "string", llmPrompt: "" })
                 }}
@@ -383,25 +586,23 @@ export function SettingsPage({
               </button>
             </div>
             <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] divide-y divide-[var(--line)]">
-              {fields.map((f) => (
-                <div key={String(f.id)} className="px-4 py-2.5 flex items-center justify-between gap-2 text-[12px]">
-                  <div className="min-w-0">
-                    <span className="font-semibold">{String(f.name)}</span>{" "}
-                    <span className="tag font-mono">{String(f.code)}</span>{" "}
-                    <span className="tag">{String(f.type)}</span>
-                    {Boolean(f.llmPrompt) && <div className="text-[11px] text-[var(--muted)] truncate">{String(f.llmPrompt)}</div>}
+              {fields.map((f) => {
+                const fid = String(f.id)
+                return (
+                  <div key={fid} className="px-4 py-2.5 flex items-center justify-between gap-2 text-[12px]">
+                    <div className="min-w-0">
+                      <span className="font-semibold">{String(f.name)}</span>{" "}
+                      <span className="tag font-mono">{String(f.code)}</span>{" "}
+                      <span className="tag">{String(f.type)}</span>
+                      {Boolean(f.llmPrompt) && <div className="text-[11px] text-[var(--muted)] truncate">{String(f.llmPrompt)}</div>}
+                    </div>
+                    {Boolean(f.isExtra) &&
+                      renderDeleteGuard(`fld:${fid}`, async () => {
+                        setFields(await transport.deleteField(workspace.id, fid))
+                      })}
                   </div>
-                  {Boolean(f.isExtra) && (
-                    <button
-                      type="button"
-                      onClick={async () => setFields(await transport.deleteField(workspace.id, String(f.id)))}
-                      className="text-[var(--rose)]"
-                    >
-                      <Trash2 size={13.5} />
-                    </button>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
@@ -493,9 +694,25 @@ export function SettingsPage({
         <div className="fixed inset-0 z-[110] grid place-items-center bg-black/45 p-4" onClick={() => setNewWsModal(false)}>
           <form onSubmit={createWorkspace} onClick={(e) => e.stopPropagation()} className="glass-overlay w-full max-w-[420px] rounded-[16px] p-5 space-y-3">
             <h3 className="text-[15px] font-bold">Thêm Công ty / MST mới</h3>
-            <input required placeholder="Tên công ty / Hộ kinh doanh" value={newWsForm.name} onChange={(e) => setNewWsForm({ ...newWsForm, name: e.target.value })} className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]" />
-            <input required placeholder="Mã số thuế" value={newWsForm.taxCode} onChange={(e) => setNewWsForm({ ...newWsForm, taxCode: e.target.value })} className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px] tnum" />
-            <select value={newWsForm.accountingRegime} onChange={(e) => setNewWsForm({ ...newWsForm, accountingRegime: e.target.value as AccountingRegime })} className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]">
+            <input
+              required
+              placeholder="Tên công ty / Hộ kinh doanh"
+              value={newWsForm.name}
+              onChange={(e) => setNewWsForm({ ...newWsForm, name: e.target.value })}
+              className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]"
+            />
+            <input
+              required
+              placeholder="Mã số thuế"
+              value={newWsForm.taxCode}
+              onChange={(e) => setNewWsForm({ ...newWsForm, taxCode: e.target.value })}
+              className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px] tnum"
+            />
+            <select
+              value={newWsForm.accountingRegime}
+              onChange={(e) => setNewWsForm({ ...newWsForm, accountingRegime: e.target.value as AccountingRegime })}
+              className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]"
+            >
               {Object.entries(REGIME_METADATA).map(([k, v]) => (
                 <option key={k} value={k} className="bg-[var(--panel-solid)]">{v.label}</option>
               ))}

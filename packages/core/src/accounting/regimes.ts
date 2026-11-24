@@ -95,6 +95,19 @@ export function getAccountsForRegime(regime: AccountingRegime): AccountDefinitio
   }
 }
 
+export const HKD_TAX_SECTORS: Array<{
+  code: "pp" | "dv" | "sx" | "khac"
+  label: string
+  vatRatePct: number
+  pitRatePct: number
+  accountCode: string
+}> = [
+  { code: "pp", label: "Phân phối, cung cấp hàng hóa (1% GTGT + 0.5% TNCN)", vatRatePct: 1, pitRatePct: 0.5, accountCode: "S1-DT-PP" },
+  { code: "dv", label: "Dịch vụ, xây dựng không bao thầu NVL (5% GTGT + 2% TNCN)", vatRatePct: 5, pitRatePct: 2, accountCode: "S1-DT-DV" },
+  { code: "sx", label: "Sản xuất, vận tải, ăn uống, DV gắn HH (3% GTGT + 1.5% TNCN)", vatRatePct: 3, pitRatePct: 1.5, accountCode: "S1-DT-SX" },
+  { code: "khac", label: "Hoạt động kinh doanh khác (2% GTGT + 1% TNCN)", vatRatePct: 2, pitRatePct: 1, accountCode: "S1-DT-KHAC" }
+]
+
 export const REGIME_METADATA: Record<AccountingRegime, { label: string; circular: string; description: string }> = {
   TT99_2025: {
     label: "Thông tư 99/2025/TT-BTC",

@@ -36,6 +36,22 @@ export default defineConfig({
         "@t-tax/core": resolve("../../packages/core/src/browser.ts")
       }
     },
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve("src/renderer/index.html"),
+          tray: resolve("src/renderer/tray.html")
+        },
+        output: {
+          manualChunks(id) {
+            const nid = id.replace(/\\/g, "/")
+            if (nid.includes("/node_modules/recharts/") || nid.includes("/node_modules/d3-")) return "vendor-charts"
+            if (nid.includes("/node_modules/lucide-react/")) return "vendor-icons"
+            return undefined
+          }
+        }
+      }
+    },
     plugins: [react(), tailwindcss()]
   }
 })

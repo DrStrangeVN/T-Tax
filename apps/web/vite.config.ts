@@ -15,7 +15,17 @@ export default defineConfig({
   },
   build: {
     outDir: resolve("dist/public"),
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const nid = id.replace(/\\/g, "/")
+          if (nid.includes("/node_modules/recharts/") || nid.includes("/node_modules/d3-")) return "vendor-charts"
+          if (nid.includes("/node_modules/lucide-react/")) return "vendor-icons"
+          return undefined
+        }
+      }
+    }
   },
   server: {
     port: 7332,

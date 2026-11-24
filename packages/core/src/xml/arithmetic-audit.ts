@@ -101,10 +101,13 @@ export function auditParsedEInvoice(invoice: ParsedEInvoice, opts: AuditOptions 
   // 6. Adjusted / replaced invoice notice
   if (invoice.relatedInvoice?.nature) {
     const kind = invoice.relatedInvoice.nature === 1 ? "thay thế" : "điều chỉnh"
+    const refLabel = [invoice.relatedInvoice.templateCode, invoice.relatedInvoice.symbol, invoice.relatedInvoice.number]
+      .filter(Boolean)
+      .join("/")
     issues.push({
       code: "ADJUSTED_OR_REPLACED_INVOICE",
-      severity: "info",
-      message: `Đây là hóa đơn ${kind} cho hóa đơn ${invoice.relatedInvoice.symbol ?? ""}/${invoice.relatedInvoice.number ?? ""}.`
+      severity: "warning",
+      message: `Hóa đơn ${kind}${refLabel ? ` cho ${refLabel}` : ""}${invoice.relatedInvoice.issuedDate ? ` (${invoice.relatedInvoice.issuedDate})` : ""} — kiểm tra đối trừ tờ khai gốc để tránh cộng trùng.`
     })
   }
 

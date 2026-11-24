@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react"
-import { Mail, FilePlus2, Landmark, FileSpreadsheet, RefreshCw, Download, X } from "lucide-react"
+import { Mail, FilePlus2, Landmark, FileSpreadsheet, RefreshCw, Download, X, Plus, Trash2, Clock } from "lucide-react"
 import {
   EMAIL_PROVIDER_PRESETS,
   VIETNAM_BANKS,
@@ -24,6 +24,10 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
 
   // Email IMAP State
   const [emailServers, setEmailServers] = useState<Array<Record<string, unknown>>>([])
+  const [emailSchedule, setEmailSchedule] = useState<{ enabled: boolean; intervalMinutes: number }>({
+    enabled: false,
+    intervalMinutes: 15
+  })
   const [emailForm, setEmailForm] = useState({
     name: "Hóa đơn Gmail",
     provider: "gmail" as keyof typeof EMAIL_PROVIDER_PRESETS,
@@ -48,9 +52,9 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
     buyerDetails: "Công ty Khách hàng\nMST: \nĐịa chỉ: ",
     items: [{ name: "Dịch vụ tư vấn & triển khai phần mềm", quantity: 1, unitPrice: 15_000_000, vatRate: 8 }],
     notes: "Vui lòng thanh toán qua chuyển khoản VietQR theo nội dung mã hóa đơn.",
-    bankBin: "970436",
-    bankAccountNo: "",
-    bankAccountName: workspace.name
+    bankBin: workspace.bankDetails?.bankBin || "970436",
+    bankAccountNo: workspace.bankDetails?.accountNo || "",
+    bankAccountName: workspace.bankDetails?.accountName || workspace.name
   })
   const [invHtml, setInvHtml] = useState("")
 
@@ -76,9 +80,30 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
     direction: TransactionDirection
   } | null>(null)
 
+  useEffect(() => {
+    setInvData((prev) => ({
+      ...prev,
+      currency: workspace.baseCurrency || "VND",
+      sellerDetails: `${workspace.name}\nMST: ${workspace.taxCode}\n${workspace.address ?? ""}`,
+      bankBin: workspace.bankDetails?.bankBin || prev.bankBin || "970436",
+      bankAccountNo: workspace.bankDetails?.accountNo || prev.bankAccountNo || "",
+      bankAccountName: workspace.bankDetails?.accountName || workspace.name
+    }))
+    setGdtCreds((prev) => ({ ...prev, username: workspace.taxCode }))
+  }, [workspace])
+
   const loadEmailServers = useCallback(async () => {
-    const data = await transport.getAppData(workspace.id, "email")
+    const [data, sched] = await Promise.all([
+      transport.getAppData(workspace.id, "email"),
+      transport.getAppData(workspace.id, "email_schedule")
+    ])
     setEmailServers((data.servers as Array<Record<string, unknown>>) ?? [])
+    if (sched && typeof sched.intervalMinutes === "number") {
+      setEmailSchedule({
+        enabled: Boolean(sched.enabled),
+        intervalMinutes: Number(sched.intervalMinutes) || 15
+      })
+    }
   }, [workspace.id, transport])
 
   useEffect(() => {
@@ -97,6 +122,17 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
     setEmailForm({ ...emailForm, password: "" })
     onToast("Đã lưu cấu hình hộp thư IMAP an toàn.", "ok")
     loadEmailServers()
+  }
+
+  const handleSaveEmailSchedule = async (next: { enabled: boolean; intervalMinutes: number }) => {
+    setEmailSchedule(next)
+    await transport.saveAppData(workspace.id, "email_schedule", next)
+    onToast(
+      next.enabled
+        ? `Đã bật đồng bộ Email tự động mỗi ${next.intervalMinutes} phút.`
+        : "Đã tắt đồng bộ Email tự động.",
+      "ok"
+    )
   }
 
   const handleSyncEmail = async (serverId: string) => {
@@ -257,7 +293,7 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-5 py-3 border-b border-[var(--line)] flex items-center justify-between bg-[var(--sheet-bg)]">
+      <div className="px-5 py-3 border-b border-[var(--line)] flex items-center justify-between bg-[var(--sheet-bg)] shrink-0">
         <button type="button" onClick={() => setActiveApp("hub")} className="gb">
           <X size={13} />
           <span>Quay lại Danh sách Tiện ích</span>
@@ -267,69 +303,117 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
       <div className="flex-1 overflow-y-auto p-5 sm:p-6">
         {activeApp === "email" && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <form onSubmit={handleSaveEmail} className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
-              <h3 className="text-[14px] font-semibold">Thêm Hộp thư nhận Hóa đơn</h3>
-              <div className="grid grid-cols-2 gap-2.5">
-                <select
-                  value={emailForm.provider}
-                  onChange={(e) => {
-                    const key = e.target.value as keyof typeof EMAIL_PROVIDER_PRESETS
-                    const p = EMAIL_PROVIDER_PRESETS[key]
-                    setEmailForm({ ...emailForm, provider: key, host: p.host, port: p.port, secure: p.secure })
-                  }}
-                  className="h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
-                >
-                  {Object.entries(EMAIL_PROVIDER_PRESETS).map(([k, v]) => (
-                    <option key={k} value={k} className="bg-[var(--panel-solid)]">{v.label}</option>
-                  ))}
-                </select>
+            <div className="space-y-4">
+              <form onSubmit={handleSaveEmail} className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
+                <h3 className="text-[14px] font-semibold">Thêm Hộp thư nhận Hóa đơn</h3>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <select
+                    value={emailForm.provider}
+                    onChange={(e) => {
+                      const key = e.target.value as keyof typeof EMAIL_PROVIDER_PRESETS
+                      const p = EMAIL_PROVIDER_PRESETS[key]
+                      setEmailForm({ ...emailForm, provider: key, host: p.host, port: p.port, secure: p.secure })
+                    }}
+                    className="h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                  >
+                    {Object.entries(EMAIL_PROVIDER_PRESETS).map(([k, v]) => (
+                      <option key={k} value={k} className="bg-[var(--panel-solid)]">{v.label}</option>
+                    ))}
+                  </select>
+                  <input
+                    required
+                    placeholder="Tên gợi nhớ"
+                    value={emailForm.name}
+                    onChange={(e) => setEmailForm({ ...emailForm, name: e.target.value })}
+                    className="h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-2.5">
+                  <input
+                    required
+                    placeholder="IMAP Host"
+                    value={emailForm.host}
+                    onChange={(e) => setEmailForm({ ...emailForm, host: e.target.value })}
+                    className="col-span-2 h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                  />
+                  <input
+                    type="number"
+                    value={emailForm.port}
+                    onChange={(e) => setEmailForm({ ...emailForm, port: Number(e.target.value) || 993 })}
+                    className="h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
+                  />
+                </div>
                 <input
                   required
-                  placeholder="Tên gợi nhớ"
-                  value={emailForm.name}
-                  onChange={(e) => setEmailForm({ ...emailForm, name: e.target.value })}
-                  className="h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                  placeholder="Email đăng nhập"
+                  value={emailForm.username}
+                  onChange={(e) => setEmailForm({ ...emailForm, username: e.target.value })}
+                  className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
                 />
-              </div>
-              <div className="grid grid-cols-3 gap-2.5">
                 <input
                   required
-                  placeholder="IMAP Host"
-                  value={emailForm.host}
-                  onChange={(e) => setEmailForm({ ...emailForm, host: e.target.value })}
-                  className="col-span-2 h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                  type="password"
+                  placeholder="Mật khẩu ứng dụng (App Password)"
+                  value={emailForm.password}
+                  onChange={(e) => setEmailForm({ ...emailForm, password: e.target.value })}
+                  className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
                 />
-                <input
-                  type="number"
-                  value={emailForm.port}
-                  onChange={(e) => setEmailForm({ ...emailForm, port: Number(e.target.value) || 993 })}
-                  className="h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
-                />
+                <button type="submit" className="pb">Lưu cấu hình IMAP</button>
+              </form>
+
+              {/* Background Auto Sync Scheduler */}
+              <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <Clock size={16} className="text-[var(--cyan)] shrink-0" />
+                  <div>
+                    <div className="text-[13px] font-semibold">Lịch đồng bộ IMAP tự động</div>
+                    <div className="text-[11px] text-[var(--muted)]">Tự động kéo chứng từ XML/PDF mới khi mở T-Tax</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2.5">
+                  <select
+                    value={emailSchedule.intervalMinutes}
+                    onChange={(e) =>
+                      handleSaveEmailSchedule({
+                        enabled: emailSchedule.enabled,
+                        intervalMinutes: Number(e.target.value) || 15
+                      })
+                    }
+                    className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
+                  >
+                    <option value={5} className="bg-[var(--panel-solid)]">Mỗi 5 phút</option>
+                    <option value={15} className="bg-[var(--panel-solid)]">Mỗi 15 phút</option>
+                    <option value={30} className="bg-[var(--panel-solid)]">Mỗi 30 phút</option>
+                    <option value={60} className="bg-[var(--panel-solid)]">Mỗi 60 phút</option>
+                  </select>
+                  <label className="sw">
+                    <input
+                      type="checkbox"
+                      checked={emailSchedule.enabled}
+                      onChange={(e) =>
+                        handleSaveEmailSchedule({
+                          enabled: e.target.checked,
+                          intervalMinutes: emailSchedule.intervalMinutes
+                        })
+                      }
+                    />
+                    <i />
+                  </label>
+                </div>
               </div>
-              <input
-                required
-                placeholder="Email đăng nhập"
-                value={emailForm.username}
-                onChange={(e) => setEmailForm({ ...emailForm, username: e.target.value })}
-                className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
-              />
-              <input
-                required
-                type="password"
-                placeholder="Mật khẩu ứng dụng (App Password)"
-                value={emailForm.password}
-                onChange={(e) => setEmailForm({ ...emailForm, password: e.target.value })}
-                className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
-              />
-              <button type="submit" className="pb">Lưu cấu hình IMAP</button>
-            </form>
+            </div>
 
             <div className="space-y-3">
               {emailServers.map((srv) => (
-                <div key={String(srv.id)} className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 flex items-center justify-between gap-3">
+                <div
+                  key={String(srv.id)}
+                  className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 flex items-center justify-between gap-3"
+                >
                   <div className="min-w-0">
                     <div className="font-semibold text-[13px]">{String(srv.name)}</div>
-                    <div className="text-[11.5px] text-[var(--muted)] truncate">{String(srv.username)} · {String(srv.host)}</div>
+                    <div className="text-[11.5px] text-[var(--muted)] truncate">
+                      {String(srv.username)} · {String(srv.host)}
+                    </div>
                     <div className="text-[10.5px] text-[var(--dim)] mt-0.5">
                       Trạng thái: {String(srv.status ?? "idle")} · UID {String(srv.lastProcessedUid ?? 0)}
                     </div>
@@ -401,8 +485,25 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
               </div>
 
               <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11.5px] font-semibold text-[var(--muted)]">Dòng hàng hóa / Dịch vụ</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setInvData({
+                        ...invData,
+                        items: [...invData.items, { name: "Dịch vụ bổ sung", quantity: 1, unitPrice: 1_000_000, vatRate: 8 }]
+                      })
+                    }
+                    className="gb"
+                  >
+                    <Plus size={12.5} />
+                    <span>Thêm dòng</span>
+                  </button>
+                </div>
+
                 {invData.items.map((it, idx) => (
-                  <div key={idx} className="grid grid-cols-12 gap-1.5">
+                  <div key={idx} className="grid grid-cols-12 gap-1.5 items-center">
                     <input
                       value={it.name}
                       onChange={(e) => {
@@ -410,7 +511,7 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
                         next[idx] = { ...it, name: e.target.value }
                         setInvData({ ...invData, items: next })
                       }}
-                      className="col-span-6 h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                      className="col-span-5 h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
                     />
                     <input
                       type="number"
@@ -430,8 +531,35 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
                         next[idx] = { ...it, unitPrice: Number(e.target.value) || 0 }
                         setInvData({ ...invData, items: next })
                       }}
-                      className="col-span-4 h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
+                      className="col-span-3 h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
                     />
+                    <select
+                      value={it.vatRate}
+                      onChange={(e) => {
+                        const next = [...invData.items]
+                        next[idx] = { ...it, vatRate: Number(e.target.value) }
+                        setInvData({ ...invData, items: next })
+                      }}
+                      className="col-span-1 h-8 px-1 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[11px] tnum"
+                    >
+                      {[0, 5, 8, 10].map((v) => (
+                        <option key={v} value={v} className="bg-[var(--panel-solid)]">{v}%</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={invData.items.length <= 1}
+                      onClick={() =>
+                        setInvData({
+                          ...invData,
+                          items: invData.items.filter((_, i) => i !== idx)
+                        })
+                      }
+                      className="col-span-1 h-8 grid place-items-center text-[var(--rose)] disabled:opacity-30"
+                      title="Xóa dòng"
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </div>
                 ))}
               </div>
@@ -557,7 +685,17 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
               <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-[13px] font-semibold tnum">Xem trước {tabPreview.rows.length} dòng</span>
-                  <button type="button" onClick={handleCommitImport} className="pb">Nhập tất cả vào Sổ</button>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={tabPreview.direction}
+                      onChange={(e) => setTabPreview({ ...tabPreview, direction: e.target.value as TransactionDirection })}
+                      className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                    >
+                      <option value="input" className="bg-[var(--panel-solid)]">Mua vào</option>
+                      <option value="output" className="bg-[var(--panel-solid)]">Bán ra</option>
+                    </select>
+                    <button type="button" onClick={handleCommitImport} className="pb">Nhập tất cả vào Sổ</button>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {tabPreview.headers.map((h) => (

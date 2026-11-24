@@ -137,6 +137,16 @@ app.post("/api/rpc", async (c) => {
         const providers = (data.providers ?? []).map((p) => ({ ...p, apiKey: decryptStr(p.apiKey) }))
         return c.json(await service.analyzeFile(args[0] as string, args[1] as string, providers))
       }
+      case "analyzeFilesBatch": {
+        const wsId = args[0] as string
+        const data = service.getAppData<{ providers?: LLMProviderConfig[] }>(wsId, "llm_providers")
+        const providers = (data.providers ?? []).map((p) => ({ ...p, apiKey: decryptStr(p.apiKey) }))
+        return c.json(await service.analyzeFilesBatch(wsId, args[1] as string[], providers))
+      }
+      case "cancelBatchAnalyze":
+        return c.json({ ok: true })
+      case "batchApproveCleanXml":
+        return c.json(await service.batchApproveCleanXml(args[0] as string, args[1] as string[]))
       case "approveFileToTransaction":
         return c.json(await service.approveFileToTransaction(args[0] as string, args[1] as string, args[2] as never))
       case "splitFileItems":
@@ -155,20 +165,30 @@ app.post("/api/rpc", async (c) => {
       }
       case "listTransactions":
         return c.json(service.listTransactions(args[0] as string, args[1] as never))
+      case "getTransactionDetail":
+        return c.json(service.getTransactionDetail(args[0] as string, args[1] as string))
       case "createTransaction":
-        return c.json(service.createManualTransaction(args[0] as string, args[1] as never))
+        return c.json(await service.createManualTransaction(args[0] as string, args[1] as never))
       case "updateTransaction":
-        return c.json(service.updateTransaction(args[0] as string, args[1] as string, args[2] as never))
+        return c.json(
+          service.updateTransaction(args[0] as string, args[1] as string, args[2] as never, {
+            repostJournal: args[3] !== false
+          })
+        )
       case "bulkUpdateTransactions":
         return c.json(service.bulkUpdateTransactions(args[0] as string, args[1] as string[], args[2] as never))
       case "deleteTransactions":
         return c.json(service.deleteTransactions(args[0] as string, args[1] as string[]))
       case "getDashboardStats":
         return c.json(service.getDashboardStats(args[0] as string, args[1] as string | undefined, args[2] as string | undefined))
+      case "getSidebarBadgeCounts":
+        return c.json(service.getSidebarBadgeCounts(args[0] as string))
+      case "searchGlobal":
+        return c.json(service.searchGlobal(args[0] as string, args[1] as string))
       case "lookupFxRate":
         return c.json(await getHistoricalExchangeRate(args[1] as string, args[2] as string, args[3] as string, service.createFxCacheAdapter()))
       case "listJournalEntries":
-        return c.json(service.listJournalEntries(args[0] as string))
+        return c.json(service.listJournalEntries(args[0] as string, args[1] as never))
       case "updateJournalLine":
         service.updateJournalLine(args[0] as string, args[1] as never)
         return c.json({ ok: true })
@@ -182,6 +202,9 @@ app.post("/api/rpc", async (c) => {
         return c.json(service.listBankStatements(args[0] as string))
       case "confirmBankMatch":
         service.confirmBankMatch(args[0] as string, args[1] as string, args[2] as string)
+        return c.json({ ok: true })
+      case "unmatchBankStatement":
+        service.unmatchBankStatement(args[0] as string, args[1] as string)
         return c.json({ ok: true })
       case "getAppData":
         return c.json(service.getAppData(args[0] as string, args[1] as string))
@@ -285,13 +308,41 @@ if (existsSync(staticRoot)) {
   app.use("/*", serveStatic({ root: staticRoot }))
 }
 
+let emailSyncTimer: ReturnType<typeof setInterval> | null = null
+const lastEmailSyncAt = new Map<string, number>()
+
 if (process.env.TTAX_NO_LISTEN !== "1") {
   serve({ fetch: app.fetch, port: PORT }, () => {
     console.log(`T-Tax Web running on http://localhost:${PORT}`)
   })
+  emailSyncTimer = setInterval(async () => {
+    try {
+      const workspaces = service.listWorkspaces()
+      const now = Date.now()
+      for (const ws of workspaces) {
+        const sched = service.getAppData<{ enabled?: boolean; intervalMinutes?: number }>(ws.id, "email_schedule")
+        if (!sched?.enabled) continue
+        const intervalMs = Math.max(5, Number(sched.intervalMinutes || 15)) * 60_000
+        if (now - (lastEmailSyncAt.get(ws.id) ?? 0) < intervalMs) continue
+        lastEmailSyncAt.set(ws.id, now)
+        const cfg = service.getAppData<{ servers?: Array<{ id: string; isActive?: boolean }> }>(ws.id, "email")
+        for (const srv of cfg.servers ?? []) {
+          if (srv.isActive === false) continue
+          await service.syncEmailNow(ws.id, srv.id, decryptStr).catch(() => {})
+        }
+      }
+    } catch {
+      // ignore scheduler error
+    }
+  }, 5 * 60_000)
+  emailSyncTimer.unref()
 }
 
 export function closeWebServer(): void {
+  if (emailSyncTimer) {
+    clearInterval(emailSyncTimer)
+    emailSyncTimer = null
+  }
   conn.close()
 }
 

@@ -6,7 +6,34 @@ export type PaymentStatus = "unpaid" | "paid" | "partial"
 export type ComplianceStatus = "valid" | "warning" | "error" | "pending"
 export type ExtractionMethod = "none" | "xml" | "pdf_text" | "vlm" | "hybrid"
 export type GlassIntensity = "clear" | "balanced" | "solid"
+export type SidebarMode = "expanded" | "rail" | "collapsed"
 export type ThemeMode = "dark" | "light" | "system"
+export type HkdTaxSectorCode = "pp" | "dv" | "sx" | "khac"
+
+export interface UiPreferences {
+  isLight: boolean
+  glassIntensity: GlassIntensity
+  sidebarMode: SidebarMode
+  activeWorkspaceId?: string
+  visibleCols?: string[]
+  unsortedSplitPct?: number
+  hkdSector?: HkdTaxSectorCode
+}
+
+export interface WorkspaceBadgeCounts {
+  unreviewedCount: number
+  complianceWarnings: number
+}
+
+export interface BatchAnalyzeProgressEvent {
+  jobId: string
+  done: number
+  total: number
+  currentFileId: string
+  currentFilename: string
+  status: "running" | "done" | "cancelled" | "error"
+  error?: string
+}
 
 export interface BankDetails {
   bankBin?: string

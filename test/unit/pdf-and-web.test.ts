@@ -94,6 +94,22 @@ describe("PDF Renderer (Zero Ghostscript), Tabular Import & Web Hono API", () =>
       })
       expect(saveMail.status).toBe(200)
 
+      const badges = await app.request("/api/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method: "getSidebarBadgeCounts", args: [wsId] })
+      })
+      expect(badges.status).toBe(200)
+      expect(await badges.json()).toMatchObject({ unreviewedCount: 0, complianceWarnings: 0 })
+
+      const gSearch = await app.request("/api/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method: "searchGlobal", args: [wsId, "test"] })
+      })
+      expect(gSearch.status).toBe(200)
+      expect(await gSearch.json()).toEqual({ transactions: [], counterparties: [] })
+
       const exp = await app.request("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

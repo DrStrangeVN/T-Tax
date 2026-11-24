@@ -77,10 +77,14 @@ body.desktop-vibrancy .lg-wallpaper {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 246px minmax(0, 1fr);
+  grid-template-columns: 236px minmax(0, 1fr);
   height: 100dvh;
   background: transparent;
   transition: grid-template-columns var(--dur-med) var(--ease);
+}
+
+body.sb-rail .ttax-shell {
+  grid-template-columns: 60px minmax(0, 1fr);
 }
 
 body.sb-off .ttax-shell {
@@ -92,7 +96,7 @@ body.sb-off .ttax-shell {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 16px 12px 14px;
+  padding: 14px 10px 12px;
   background: var(--side-bg);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -108,18 +112,24 @@ body.desktop-vibrancy .side {
 }
 
 /* Keep macOS Light Mode sidebar layer opaque so CoreText/Skia dark glyphs never halo on vibrancy backing */
-body.desktop-vibrancy.light .side {
+body.desktop-vibrancy.light:not(.reduce-transparency) .side {
   background: #EEF0F5;
 }
 
 body.platform-macos .side {
-  padding-top: 44px; /* clearance for macOS traffic lights */
+  padding-top: 42px; /* clearance for macOS traffic lights */
 }
 
 body.sb-off .side {
   padding: 0;
   opacity: 0;
   pointer-events: none;
+}
+
+body.sb-rail .side {
+  padding-left: 8px;
+  padding-right: 8px;
+  align-items: center;
 }
 
 /* Linear Matte Inset Sheet for Workspace Content */
@@ -155,8 +165,9 @@ body.sb-off .inset-sheet-wrap {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 20px;
+  gap: 10px;
+  padding: 9px 16px;
+  min-height: 48px;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
   backdrop-filter: var(--glass-blur);

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react"
+import React, { useEffect, useMemo, useState } from "react"
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -7,19 +7,33 @@ import {
   Upload,
   Sparkles,
   ShieldCheck,
-  Clock
+  Clock,
+  CalendarClock,
+  Inbox,
+  ChevronRight
 } from "lucide-react"
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts"
 import type { WorkspaceDTO } from "@t-tax/core"
-import { useTransport, fileToPayload } from "../transport/client.js"
+import { useTransport, smartIngestFileList } from "../transport/client.js"
 import { formatMoney, formatShortVnd } from "../utils/format.js"
 import type { NavPage } from "../components/LiquidShell.js"
 
 interface DashboardProps {
   workspace: WorkspaceDTO
   onNavigate: (page: NavPage) => void
+  onOpenTransaction?: (txId: string) => void
   onRefreshCounts: () => void
   onToast: (msg: string, tone?: "ok" | "warn" | "err") => void
+}
+
+interface ActionItemRow {
+  id: string
+  name: string | null
+  merchant: string | null
+  invoiceNumber: string | null
+  issuedAt: string | null
+  totalAmount: number
+  complianceStatus: string
 }
 
 interface DashboardStats {
@@ -34,13 +48,48 @@ interface DashboardStats {
   complianceWarnings: number
   monthlySeries: Array<{ period: string; revenue: number; expense: number; vatOut: number; vatIn: number }>
   categoryBreakdown: Array<{ code: string; name: string; color: string; total: number }>
+  actionItems?: ActionItemRow[]
 }
 
-export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast }: DashboardProps) {
+function getNextVatDeadline(taxPeriod: string): { label: string; dueText: string; daysLeft: number; urgent: boolean } {
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  if (taxPeriod === "monthly") {
+    const prevMonth = now.getMonth() === 0 ? 12 : now.getMonth()
+    const due =
+      now.getDate() <= 20
+        ? new Date(now.getFullYear(), now.getMonth(), 20)
+        : new Date(now.getFullYear(), now.getMonth() + 1, 20)
+    const daysLeft = Math.ceil((due.getTime() - today.getTime()) / 86_400_000)
+    return {
+      label: `Tờ khai GTGT Tháng ${String(now.getDate() <= 20 ? prevMonth : now.getMonth() + 1).padStart(2, "0")}`,
+      dueText: `${String(due.getDate()).padStart(2, "0")}/${String(due.getMonth() + 1).padStart(2, "0")}/${due.getFullYear()}`,
+      daysLeft,
+      urgent: daysLeft <= 7
+    }
+  }
+  const currentQ = Math.floor(now.getMonth() / 3) + 1
+  const qStartMonth = (currentQ - 1) * 3
+  const inGraceWindow = now.getMonth() === qStartMonth
+  const targetQ = inGraceWindow ? (currentQ === 1 ? 4 : currentQ - 1) : currentQ
+  const due = inGraceWindow
+    ? new Date(now.getFullYear(), qStartMonth + 1, 0)
+    : new Date(now.getFullYear(), qStartMonth + 4, 0)
+  const daysLeft = Math.ceil((due.getTime() - today.getTime()) / 86_400_000)
+  return {
+    label: `Tờ khai GTGT Quý ${targetQ}`,
+    dueText: `${String(due.getDate()).padStart(2, "0")}/${String(due.getMonth() + 1).padStart(2, "0")}/${due.getFullYear()}`,
+    daysLeft,
+    urgent: daysLeft <= 10
+  }
+}
+
+export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefreshCounts, onToast }: DashboardProps) {
   const transport = useTransport()
   const [period, setPeriod] = useState<"month" | "quarter" | "year" | "all">("year")
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [legalRules, setLegalRules] = useState<Array<Record<string, unknown>>>([])
+  const [taxPeriod, setTaxPeriod] = useState<string>("quarterly")
   const [dragging, setDragging] = useState(false)
 
   const computeDateRange = (p: typeof period): { from?: string; to?: string } => {
@@ -61,22 +110,35 @@ export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast 
   }
 
   useEffect(() => {
+    let active = true
     const { from, to } = computeDateRange(period)
     transport
       .getDashboardStats(workspace.id, from, to)
-      .then((d) => setStats(d as unknown as DashboardStats))
+      .then((d) => {
+        if (active) setStats(d as unknown as DashboardStats)
+      })
       .catch(() => {})
     transport
       .listLegalRules()
-      .then((r) => setLegalRules(r))
+      .then((r) => {
+        if (active) setLegalRules(r)
+      })
       .catch(() => {})
+    transport
+      .getSettings(workspace.id)
+      .then((cfg) => {
+        if (active && cfg.tax_period) setTaxPeriod(cfg.tax_period)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
   }, [workspace.id, period, transport])
 
   const handleQuickDrop = async (fileList: FileList | null) => {
     if (!fileList?.length) return
     try {
-      const payloads = await Promise.all(Array.from(fileList).map(fileToPayload))
-      const res = await transport.ingestFiles(workspace.id, payloads, "drop")
+      const res = await smartIngestFileList(transport, workspace.id, fileList, "drop")
       onRefreshCounts()
       onToast(`Đã nạp ${res.createdFiles.length} chứng từ vào Hộp thư AI.`, "ok")
       onNavigate("unsorted")
@@ -85,7 +147,7 @@ export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast 
     }
   }
 
-  const s = stats ?? {
+  const s: DashboardStats = stats ?? {
     totalRevenue: 0,
     totalExpense: 0,
     netProfit: 0,
@@ -96,9 +158,12 @@ export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast 
     unreviewedCount: 0,
     complianceWarnings: 0,
     monthlySeries: [],
-    categoryBreakdown: []
+    categoryBreakdown: [],
+    actionItems: []
   }
 
+  const deadline = useMemo(() => getNextVatDeadline(taxPeriod), [taxPeriod])
+  const actionItems = s.actionItems ?? []
   const maxCat = s.categoryBreakdown[0]?.total || 1
 
   return (
@@ -174,7 +239,7 @@ export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast 
       </div>
 
       <div className="p-5 sm:p-6 space-y-5">
-        {/* Period Filter + Quick Drop Strip */}
+        {/* Period Filter + Actions */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="seg">
             {[
@@ -205,21 +270,23 @@ export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast 
           </div>
         </div>
 
-        {/* Main 2-Col Analytics + Dropzone */}
+        {/* Main 2-Col Analytics + Actionable Queue */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4">
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="text-[13.5px] font-semibold text-[var(--text)]">Dòng tiền Doanh thu & Chi phí theo tháng</h2>
-                <p className="text-[11px] text-[var(--muted)]">Quy đổi về {workspace.baseCurrency} theo tỷ giá ngày lập chứng từ</p>
+                <p className="text-[11px] text-[var(--muted)]">
+                  Quy đổi về {workspace.baseCurrency} theo tỷ giá ngày lập chứng từ
+                </p>
               </div>
               <span className="tag tnum">{s.monthlySeries.length} kỳ</span>
             </div>
 
-            <div className="h-[240px] w-full">
+            <div className="h-[250px] w-full">
               {s.monthlySeries.length === 0 ? (
                 <div className="h-full grid place-items-center text-[12px] text-[var(--dim)]">
-                  Chưa có dữ liệu giao dịch trong kỳ. Thả hóa đơn XML/PDF để bắt đầu.
+                  Chưa có dữ liệu giao dịch trong kỳ. Thả hóa đơn XML/PDF vào cửa sổ để bắt đầu.
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
@@ -236,15 +303,15 @@ export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast 
                         color: "var(--text)"
                       }}
                     />
-                    <Bar dataKey="revenue" name="Doanh thu" fill="#34D399" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="expense" name="Chi phí" fill="#FB7185" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="revenue" name="Doanh thu" fill="#34D399" radius={[4, 4, 0, 0]} maxBarSize={42} />
+                    <Bar dataKey="expense" name="Chi phí" fill="#FB7185" radius={[4, 4, 0, 0]} maxBarSize={42} />
                   </BarChart>
                 </ResponsiveContainer>
               )}
             </div>
           </div>
 
-          {/* Drop Zone Widget */}
+          {/* Actionable Queue */}
           <div
             onDragOver={(e) => {
               e.preventDefault()
@@ -256,27 +323,106 @@ export function DashboardPage({ workspace, onNavigate, onRefreshCounts, onToast 
               setDragging(false)
               handleQuickDrop(e.dataTransfer.files)
             }}
-            className={`rounded-[14px] border border-dashed p-5 flex flex-col items-center justify-center text-center transition-colors ${
-              dragging
-                ? "border-[var(--cyan)] bg-[var(--cyan-s)]"
-                : "border-[var(--line2)] bg-[var(--panel)]"
+            className={`rounded-[14px] border p-4 flex flex-col justify-between gap-3 transition-colors ${
+              dragging ? "border-[var(--cyan)] bg-[var(--cyan-s)]" : "border-[var(--line)] bg-[var(--panel)]"
             }`}
           >
-            <div className="w-11 h-11 rounded-[12px] grid place-items-center bg-[var(--raised)] border border-[var(--line)] text-[var(--cyan)] mb-3">
-              <Upload size={20} strokeWidth={1.8} />
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-[13.5px] font-semibold text-[var(--text)]">Hàng đợi cần xử lý</h2>
+                <button
+                  type="button"
+                  onClick={() => onNavigate("unsorted")}
+                  className="text-[11px] font-medium text-[var(--cyan)] hover:underline"
+                >
+                  Tới Hộp thư
+                </button>
+              </div>
+
+              {/* VAT Deadline Banner */}
+              <div className="p-2.5 rounded-[10px] border border-[var(--line)] bg-[var(--raised)] flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <CalendarClock
+                    size={15}
+                    strokeWidth={1.8}
+                    className={deadline.urgent ? "text-[var(--amber)] shrink-0" : "text-[var(--cyan)] shrink-0"}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-medium text-[var(--text)] truncate">{deadline.label}</div>
+                    <div className="text-[11px] text-[var(--muted)] tnum">Hạn nộp {deadline.dueText}</div>
+                  </div>
+                </div>
+                <span className={`tag tnum shrink-0 ${deadline.urgent ? "tag-warn" : "tag-info"}`}>
+                  {deadline.daysLeft >= 0 ? `Còn ${deadline.daysLeft} ngày` : `Quá hạn ${Math.abs(deadline.daysLeft)}n`}
+                </span>
+              </div>
+
+              {/* Unreviewed shortcut */}
+              {s.unreviewedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate("unsorted")}
+                  className="w-full p-2.5 rounded-[10px] border border-[var(--line2)] bg-[var(--cyan-s)] flex items-center justify-between gap-2 text-left hover:brightness-105"
+                >
+                  <span className="flex items-center gap-2 text-[12px] font-semibold text-[var(--cyan)]">
+                    <Inbox size={14} strokeWidth={1.9} />
+                    <span className="tnum">{s.unreviewedCount} chứng từ chờ bóc tách / ghi sổ</span>
+                  </span>
+                  <ChevronRight size={14} className="text-[var(--cyan)] shrink-0" />
+                </button>
+              )}
+
+              {/* Compliance warning items */}
+              <div className="space-y-1.5">
+                {actionItems.length === 0 ? (
+                  <div className="py-3 text-center text-[11.5px] text-[var(--dim)] rounded-[10px] border border-[var(--line)] bg-[var(--raised)]">
+                    Không có giao dịch lỗi/cảnh báo chờ xử lý.
+                  </div>
+                ) : (
+                  actionItems.slice(0, 4).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        if (onOpenTransaction) onOpenTransaction(item.id)
+                        else onNavigate("transactions")
+                      }}
+                      className="w-full p-2 rounded-[9px] border border-[var(--line)] bg-[var(--raised)] hover:bg-[var(--row-h)] flex items-center justify-between gap-2 text-left"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-[12px] font-medium text-[var(--text)] truncate">
+                          {item.merchant || item.name || item.invoiceNumber || "Chứng từ"}
+                        </div>
+                        <div className="text-[10.5px] text-[var(--muted)] tnum">
+                          {item.invoiceNumber ? `Số ${item.invoiceNumber} · ` : ""}
+                          {item.issuedAt ?? "—"}
+                        </div>
+                      </div>
+                      <span className={`tag shrink-0 tnum ${item.complianceStatus === "error" ? "tag-err" : "tag-warn"}`}>
+                        {formatShortVnd(item.totalAmount)}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
             </div>
-            <div className="text-[13.5px] font-semibold text-[var(--text)]">Thả nhanh Hóa đơn & Chứng từ</div>
-            <p className="text-[11.5px] text-[var(--muted)] mt-1 max-w-[230px]">
-              Hỗ trợ XML (QĐ 1450/1510), PDF, ZIP cặp hóa đơn, hoặc ảnh chụp hóa đơn giấy.
-            </p>
-            <label className="pb mt-4 cursor-pointer">
-              <span>Chọn tệp từ máy</span>
+
+            {/* Compact Upload Strip */}
+            <label className="mt-1 px-3 py-2.5 rounded-[10px] border border-dashed border-[var(--line2)] bg-[var(--raised)] hover:border-[var(--cyan)] cursor-pointer flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2 text-[12px] font-medium text-[var(--text)] min-w-0 truncate">
+                <Upload size={14} strokeWidth={1.8} className="text-[var(--cyan)] shrink-0" />
+                <span className="truncate">Nạp nhanh XML, PDF, ZIP, Ảnh</span>
+              </span>
+              <span className="text-[11px] font-semibold text-[var(--cyan)] shrink-0 whitespace-nowrap">Chọn tệp</span>
               <input
                 type="file"
                 multiple
                 accept=".xml,.pdf,.zip,.png,.jpg,.jpeg,.webp"
                 className="hidden"
-                onChange={(e) => handleQuickDrop(e.target.files)}
+                onChange={(e) => {
+                  handleQuickDrop(e.target.files)
+                  e.target.value = ""
+                }}
               />
             </label>
           </div>

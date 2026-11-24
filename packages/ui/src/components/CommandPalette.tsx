@@ -1,4 +1,4 @@
-import React, { useEffect } from "react"
+import React, { useEffect, useState } from "react"
 import { Command } from "cmdk"
 import {
   LayoutDashboard,
@@ -13,14 +13,23 @@ import {
   Sun,
   Moon,
   Search,
-  Download
+  Download,
+  FileText,
+  ArrowRightLeft
 } from "lucide-react"
+import type { WorkspaceDTO } from "@t-tax/core"
+import { useTransport } from "../transport/client.js"
+import { formatMoney } from "../utils/format.js"
 import type { NavPage } from "./LiquidShell.js"
 
 interface CommandPaletteProps {
   open: boolean
   onClose: () => void
   onNavigate: (page: NavPage) => void
+  onOpenTransaction: (txId: string) => void
+  workspaceId: string
+  workspaces: WorkspaceDTO[]
+  onSwitchWorkspace: (id: string) => void
   onToggleTheme: () => void
   onQuickExport: (kind: "htkk_in" | "misa_in") => void
   isLight: boolean
@@ -30,10 +39,40 @@ export function CommandPalette({
   open,
   onClose,
   onNavigate,
+  onOpenTransaction,
+  workspaceId,
+  workspaces,
+  onSwitchWorkspace,
   onToggleTheme,
   onQuickExport,
   isLight
 }: CommandPaletteProps) {
+  const transport = useTransport()
+  const [query, setQuery] = useState("")
+  const [searchRes, setSearchRes] = useState<{
+    transactions: Array<Record<string, unknown>>
+    counterparties: Array<Record<string, unknown>>
+  }>({ transactions: [], counterparties: [] })
+
+  useEffect(() => {
+    if (!open) {
+      setQuery("")
+      setSearchRes({ transactions: [], counterparties: [] })
+    }
+  }, [open])
+
+  useEffect(() => {
+    const q = query.trim()
+    if (!open || q.length < 2) {
+      setSearchRes({ transactions: [], counterparties: [] })
+      return
+    }
+    const timer = setTimeout(() => {
+      transport.searchGlobal(workspaceId, q).then(setSearchRes).catch(() => {})
+    }, 140)
+    return () => clearTimeout(timer)
+  }, [open, query, workspaceId, transport])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -56,19 +95,21 @@ export function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-[120] flex items-start justify-center pt-[14vh] bg-black/35"
+      className="fixed inset-0 z-[120] flex items-start justify-center pt-[12vh] bg-black/35"
       onClick={onClose}
     >
       <div
-        className="pal w-full max-w-[560px] overflow-hidden"
+        className="pal w-full max-w-[590px] overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        <Command label="T-Tax Command Palette" className="w-full">
+        <Command label="T-Tax Command Palette" className="w-full" shouldFilter={query.trim().length < 2}>
           <div className="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--line)]">
             <Search size={15} strokeWidth={1.8} className="text-[var(--muted)]" />
             <Command.Input
               autoFocus
-              placeholder="Tìm màn hình, lệnh kế toán, xuất HTKK/MISA, đổi giao diện..."
+              value={query}
+              onValueChange={setQuery}
+              placeholder="Tìm số hóa đơn, MST, đối tác, màn hình hoặc lệnh nhanh..."
               className="w-full bg-transparent outline-none text-[13.5px] text-[var(--text)] placeholder:text-[var(--dim)]"
             />
             <kbd className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--raised)] border border-[var(--line)] text-[var(--dim)]">
@@ -76,10 +117,60 @@ export function CommandPalette({
             </kbd>
           </div>
 
-          <Command.List className="max-h-[410px] overflow-y-auto p-2 space-y-1">
+          <Command.List className="max-h-[440px] overflow-y-auto p-2 space-y-1.5">
             <Command.Empty className="py-8 text-center text-[12px] text-[var(--muted)]">
-              Không tìm thấy lệnh phù hợp.
+              Không tìm thấy kết quả phù hợp.
             </Command.Empty>
+
+            {searchRes.transactions.length > 0 && (
+              <Command.Group
+                heading="Giao dịch & Hóa đơn khớp (FTS5)"
+                className="[&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-[var(--dim)] [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1"
+              >
+                {searchRes.transactions.map((tx) => (
+                  <Command.Item
+                    key={String(tx.id)}
+                    value={`tx ${String(tx.invoiceNumber ?? "")} ${String(tx.merchant ?? "")} ${String(tx.name ?? "")}`}
+                    onSelect={() => run(() => onOpenTransaction(String(tx.id)))}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-[9px] text-[12.5px] text-[var(--text)] cursor-pointer aria-selected:bg-[var(--sel)]"
+                  >
+                    <FileText size={14.5} strokeWidth={1.8} className="text-[var(--cyan)] shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium">
+                        {tx.invoiceNumber ? `HĐ ${String(tx.invoiceNumber)} · ` : ""}
+                        {String(tx.merchant || tx.name || "Chứng từ")}
+                      </div>
+                      <div className="text-[10.5px] text-[var(--dim)] truncate tnum">
+                        {String(tx.merchantTaxCode ?? "")} · {String(tx.issuedAt ?? "")}
+                      </div>
+                    </div>
+                    <span className="tnum font-semibold text-[12px] shrink-0">
+                      {formatMoney(Number(tx.totalAmount ?? 0), String(tx.currencyCode ?? "VND"))}
+                    </span>
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
+
+            {searchRes.counterparties.length > 0 && (
+              <Command.Group
+                heading="Đối tác MST"
+                className="[&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-[var(--dim)] [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1"
+              >
+                {searchRes.counterparties.map((cp) => (
+                  <Command.Item
+                    key={String(cp.id)}
+                    value={`cp ${String(cp.taxCode)} ${String(cp.name)}`}
+                    onSelect={() => run(() => onNavigate("counterparties"))}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-[9px] text-[12.5px] text-[var(--text)] cursor-pointer aria-selected:bg-[var(--sel)]"
+                  >
+                    <Building2 size={14.5} strokeWidth={1.8} className="text-[var(--green)] shrink-0" />
+                    <span className="flex-1 truncate">{String(cp.name)}</span>
+                    <span className="tag tnum">{String(cp.taxCode)}</span>
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
 
             <Command.Group
               heading="Điều hướng nhanh"
@@ -113,6 +204,26 @@ export function CommandPalette({
                 )
               })}
             </Command.Group>
+
+            {workspaces.length > 1 && (
+              <Command.Group
+                heading="Đổi Công ty / MST"
+                className="[&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-[var(--dim)] [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1"
+              >
+                {workspaces.map((ws) => (
+                  <Command.Item
+                    key={ws.id}
+                    value={`workspace ${ws.name} ${ws.taxCode}`}
+                    onSelect={() => run(() => onSwitchWorkspace(ws.id))}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-[9px] text-[12.5px] text-[var(--text)] cursor-pointer aria-selected:bg-[var(--sel)]"
+                  >
+                    <ArrowRightLeft size={14} strokeWidth={1.8} className="text-[var(--indigo)]" />
+                    <span className="flex-1 truncate">{ws.name}</span>
+                    <span className="tag tnum">{ws.taxCode}</span>
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
 
             <Command.Group
               heading="Thao tác nhanh"
