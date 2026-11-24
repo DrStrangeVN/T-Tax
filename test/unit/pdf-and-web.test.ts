@@ -134,6 +134,44 @@ describe("PDF Renderer (Zero Ghostscript), Tabular Import & Web Hono API", () =>
       expect(restoreRes.status).toBe(200)
       const restoreJson = (await restoreRes.json()) as { workspaceId: string }
       expect(restoreJson.workspaceId).toBe(wsId)
+
+      // Streaming raw file endpoint + custom Excel ledger export
+      const rawXml = "<HDon><DLHDon><TTChung><SHDon>00001234</SHDon></TTChung></DLHDon></HDon>"
+      const ingestRes = await app.request("/api/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: "ingestFiles",
+          args: [
+            wsId,
+            [
+              {
+                filename: "stream_test.xml",
+                mimetype: "application/xml",
+                base64: Buffer.from(rawXml, "utf8").toString("base64")
+              }
+            ]
+          ]
+        })
+      })
+      expect(ingestRes.status).toBe(200)
+      const ingestData = (await ingestRes.json()) as { createdFiles: Array<{ id: string }> }
+      const fileId = ingestData.createdFiles[0]!.id
+
+      const streamRes = await app.request(`/api/files/${encodeURIComponent(wsId)}/${encodeURIComponent(fileId)}/raw`)
+      expect(streamRes.status).toBe(200)
+      expect(await streamRes.text()).toBe(rawXml)
+
+      const missingRes = await app.request(`/api/files/${encodeURIComponent(wsId)}/nonexistent-id/raw`)
+      expect(missingRes.status).toBe(404)
+
+      const ledgerExp = await app.request("/api/export-custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "ledger", workspaceId: wsId, accountCode: "1121" })
+      })
+      expect(ledgerExp.status).toBe(200)
+      expect((await ledgerExp.arrayBuffer()).byteLength).toBeGreaterThan(1000)
     } finally {
       closeWebServer()
       rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })

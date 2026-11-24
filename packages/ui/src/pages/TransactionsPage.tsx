@@ -18,7 +18,8 @@ import {
   BookOpen,
   ListChecks,
   Calendar,
-  ChevronDown
+  ChevronDown,
+  Filter
 } from "lucide-react"
 import type { TransactionDirection, UiPreferences, WorkspaceDTO } from "@t-tax/core"
 import { useTransport } from "../transport/client.js"
@@ -28,7 +29,12 @@ import { formatDateVi, formatMoney } from "../utils/format.js"
 interface TransactionsProps {
   workspace: WorkspaceDTO
   initialComplianceFilter?: string
+  initialCategoryFilter?: string
+  initialDateFrom?: string
+  initialDateTo?: string
+  openNewSignal?: number
   initialFocusTxId?: string | null
+  onInspectorOpenChange?: (open: boolean) => void
   onClearPreset?: () => void
   onRefreshCounts?: () => void
   onToast: (
@@ -117,6 +123,31 @@ function saveVisibleCols(cols: string[]) {
   }
 }
 
+function loadInspectorWidth(): number {
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as UiPreferences
+      if (typeof parsed.txInspectorWidth === "number" && parsed.txInspectorWidth >= 360 && parsed.txInspectorWidth <= 560) {
+        return parsed.txInspectorWidth
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return 430
+}
+
+function saveInspectorWidth(w: number) {
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY)
+    const prev = raw ? (JSON.parse(raw) as UiPreferences) : {}
+    localStorage.setItem(UI_PREFS_KEY, JSON.stringify({ ...prev, txInspectorWidth: w }))
+  } catch {
+    // ignore
+  }
+}
+
 function getDatePresetRange(preset: "all" | "month" | "quarter" | "year"): { from?: string; to?: string } {
   if (preset === "all") return {}
   const now = new Date()
@@ -141,7 +172,12 @@ const PRESET_LABELS: Record<"all" | "month" | "quarter" | "year" | "custom", str
 export function TransactionsPage({
   workspace,
   initialComplianceFilter,
+  initialCategoryFilter,
+  initialDateFrom,
+  initialDateTo,
+  openNewSignal,
   initialFocusTxId,
+  onInspectorOpenChange,
   onClearPreset,
   onRefreshCounts,
   onToast
@@ -159,11 +195,13 @@ export function TransactionsPage({
 
   const [search, setSearch] = useState("")
   const [direction, setDirection] = useState<"all" | "input" | "output">("all")
-  const [categoryCode, setCategoryCode] = useState("")
+  const [categoryCode, setCategoryCode] = useState(initialCategoryFilter ?? "")
   const [complianceFilter, setComplianceFilter] = useState(initialComplianceFilter ?? "")
-  const [datePreset, setDatePreset] = useState<"all" | "month" | "quarter" | "year" | "custom">("all")
-  const [customFrom, setCustomFrom] = useState("")
-  const [customTo, setCustomTo] = useState("")
+  const [datePreset, setDatePreset] = useState<"all" | "month" | "quarter" | "year" | "custom">(
+    initialDateFrom || initialDateTo ? "custom" : "all"
+  )
+  const [customFrom, setCustomFrom] = useState(initialDateFrom ?? "")
+  const [customTo, setCustomTo] = useState(initialDateTo ?? "")
   const [sortBy, setSortBy] = useState<"issuedAt" | "invoiceNumber" | "merchant" | "totalAmount">("issuedAt")
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc")
 
@@ -171,15 +209,17 @@ export function TransactionsPage({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
   const [showDatePicker, setShowDatePicker] = useState(false)
+  const [showFilterMenu, setShowFilterMenu] = useState(false)
   const [showColPicker, setShowColPicker] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
 
   const [editingTx, setEditingTx] = useState<TxRow | null>(null)
   const [isLg, setIsLg] = useState(() => (typeof window === "undefined" ? true : window.innerWidth >= 1024))
+  const [inspectorWidth, setInspectorWidth] = useState<number>(() => loadInspectorWidth())
   const [editExtra, setEditExtra] = useState<Record<string, string>>({})
   const [drawerTab, setDrawerTab] = useState<"detail" | "source" | "items">("detail")
   const [txDetail, setTxDetail] = useState<TxDetailPayload | null>(null)
-  const [docPreview, setDocPreview] = useState<{ xmlHtml?: string; base64?: string; mimetype?: string; filename?: string } | null>(
+  const [docPreview, setDocPreview] = useState<{ xmlHtml?: string; rawUrl?: string; base64?: string; mimetype?: string; filename?: string } | null>(
     null
   )
 
@@ -199,6 +239,7 @@ export function TransactionsPage({
   })
 
   const datePickerRef = useRef<HTMLDivElement | null>(null)
+  const filterMenuRef = useRef<HTMLDivElement | null>(null)
   const colPickerRef = useRef<HTMLDivElement | null>(null)
   const exportMenuRef = useRef<HTMLDivElement | null>(null)
 
@@ -215,11 +256,44 @@ export function TransactionsPage({
   }, [visibleCols])
 
   useEffect(() => {
-    if (initialComplianceFilter) {
-      setComplianceFilter(initialComplianceFilter)
-      onClearPreset?.()
+    if (initialComplianceFilter) setComplianceFilter(initialComplianceFilter)
+  }, [initialComplianceFilter])
+
+  useEffect(() => {
+    if (initialCategoryFilter) setCategoryCode(initialCategoryFilter)
+  }, [initialCategoryFilter])
+
+  useEffect(() => {
+    if (initialDateFrom || initialDateTo) {
+      setDatePreset("custom")
+      setCustomFrom(initialDateFrom ?? "")
+      setCustomTo(initialDateTo ?? "")
     }
-  }, [initialComplianceFilter, onClearPreset])
+  }, [initialDateFrom, initialDateTo])
+
+  useEffect(() => {
+    if (openNewSignal && openNewSignal > 0) setShowNewModal(true)
+  }, [openNewSignal])
+
+  useEffect(() => {
+    onInspectorOpenChange?.(Boolean(editingTx))
+  }, [editingTx, onInspectorOpenChange])
+
+  useEffect(() => {
+    Promise.all([
+      transport.listCategories(workspace.id),
+      transport.listProjects(workspace.id),
+      transport.listFields(workspace.id),
+      transport.listCurrencies(workspace.id)
+    ])
+      .then(([cats, projs, flds, curs]) => {
+        setCategories(cats)
+        setProjects(projs)
+        setFields(flds)
+        setCurrencies(curs)
+      })
+      .catch(() => {})
+  }, [workspace.id, transport])
 
   const effectiveRange = useMemo(() => {
     if (datePreset === "custom") {
@@ -229,32 +303,22 @@ export function TransactionsPage({
   }, [datePreset, customFrom, customTo])
 
   const loadData = useCallback(async () => {
-    const [txRes, cats, projs, flds, curs] = await Promise.all([
-      transport.listTransactions(workspace.id, {
-        search: search || undefined,
-        direction,
-        categoryCode: categoryCode || undefined,
-        complianceStatus: complianceFilter || undefined,
-        dateFrom: effectiveRange.from,
-        dateTo: effectiveRange.to,
-        sortBy,
-        sortDir,
-        lightweight: true,
-        limit: PAGE_SIZE,
-        offset: 0
-      }),
-      transport.listCategories(workspace.id),
-      transport.listProjects(workspace.id),
-      transport.listFields(workspace.id),
-      transport.listCurrencies(workspace.id)
-    ])
+    const txRes = await transport.listTransactions(workspace.id, {
+      search: search || undefined,
+      direction,
+      categoryCode: categoryCode || undefined,
+      complianceStatus: complianceFilter || undefined,
+      dateFrom: effectiveRange.from,
+      dateTo: effectiveRange.to,
+      sortBy,
+      sortDir,
+      lightweight: true,
+      limit: PAGE_SIZE,
+      offset: 0
+    })
     setRows(txRes.rows as unknown as TxRow[])
     setTotal(txRes.total)
     setSummary(txRes.summary ?? { preTaxSum: 0, vatSum: 0, totalSum: 0 })
-    setCategories(cats)
-    setProjects(projs)
-    setFields(flds)
-    setCurrencies(curs)
   }, [workspace.id, search, direction, categoryCode, complianceFilter, effectiveRange.from, effectiveRange.to, sortBy, sortDir, transport])
 
   const loadMoreRows = useCallback(async () => {
@@ -346,6 +410,9 @@ export function TransactionsPage({
       if (showDatePicker && datePickerRef.current && !datePickerRef.current.contains(target)) {
         setShowDatePicker(false)
       }
+      if (showFilterMenu && filterMenuRef.current && !filterMenuRef.current.contains(target)) {
+        setShowFilterMenu(false)
+      }
       if (showColPicker && colPickerRef.current && !colPickerRef.current.contains(target)) {
         setShowColPicker(false)
       }
@@ -356,6 +423,7 @@ export function TransactionsPage({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setShowDatePicker(false)
+        setShowFilterMenu(false)
         setShowColPicker(false)
         setShowExportMenu(false)
         if (editingTx) {
@@ -386,20 +454,41 @@ export function TransactionsPage({
       window.removeEventListener("mousedown", onMouseDown)
       window.removeEventListener("keydown", onKeyDown)
     }
-  }, [showDatePicker, showColPicker, showExportMenu, editingTx, showNewModal, rows, openDetail])
+  }, [showDatePicker, showFilterMenu, showColPicker, showExportMenu, editingTx, showNewModal, rows, openDetail])
 
   const loadAttachedFilePreview = async (file: { id: string; filename: string; mimetype: string }) => {
     try {
-      const res = await transport.readFilePreview(workspace.id, file.id)
       if (file.filename.toLowerCase().endsWith(".xml")) {
         const html = await transport.renderXmlHtmlPreview(workspace.id, file.id)
         setDocPreview({ xmlHtml: html, mimetype: file.mimetype, filename: file.filename })
+      } else if (transport.getFileRawUrl) {
+        setDocPreview({ rawUrl: transport.getFileRawUrl(workspace.id, file.id), mimetype: file.mimetype, filename: file.filename })
       } else {
+        const res = await transport.readFilePreview(workspace.id, file.id)
         setDocPreview({ base64: res.base64, mimetype: file.mimetype, filename: file.filename })
       }
     } catch {
       onToast("Không mở được bản xem trước chứng từ gốc.", "warn")
     }
+  }
+
+  const startInspectorResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = inspectorWidth
+    let latest = startWidth
+    const move = (ev: PointerEvent) => {
+      const next = Math.min(560, Math.max(360, startWidth + (startX - ev.clientX)))
+      latest = next
+      setInspectorWidth(next)
+    }
+    const up = () => {
+      window.removeEventListener("pointermove", move)
+      window.removeEventListener("pointerup", up)
+      saveInspectorWidth(latest)
+    }
+    window.addEventListener("pointermove", move)
+    window.addEventListener("pointerup", up)
   }
 
   useEffect(() => {
@@ -539,7 +628,18 @@ export function TransactionsPage({
     }
   }
 
-  const minTableWidth = 900 + extraFieldsVisible.length * 120
+  const minTableWidth =
+    56 +
+    (visibleCols.includes("issuedAt") ? 86 : 0) +
+    (visibleCols.includes("invoiceNumber") ? 80 : 0) +
+    (visibleCols.includes("merchant") ? 155 : 0) +
+    (visibleCols.includes("name") ? 150 : 0) +
+    (visibleCols.includes("categoryCode") ? 118 : 0) +
+    extraFieldsVisible.length * 115 +
+    (visibleCols.includes("complianceStatus") ? 92 : 0) +
+    (visibleCols.includes("preTaxAmount") ? 95 : 0) +
+    (visibleCols.includes("vatAmount") ? 80 : 0) +
+    (visibleCols.includes("totalAmount") ? 124 : 0)
 
   const inspectorBody = editingTx && (
     <div className="flex flex-col h-full min-h-0">
@@ -773,11 +873,11 @@ export function TransactionsPage({
                 <div className="flex-1 min-h-[360px] rounded-[12px] border border-[var(--line)] bg-[var(--outer-rail)] overflow-hidden p-2">
                   {docPreview?.xmlHtml ? (
                     <iframe title="Source XML" srcDoc={docPreview.xmlHtml} className="w-full h-full min-h-[340px] bg-white rounded-[8px]" />
-                  ) : docPreview?.base64 ? (
+                  ) : docPreview?.rawUrl || docPreview?.base64 ? (
                     docPreview.mimetype === "application/pdf" ? (
-                      <embed src={docPreview.base64} type="application/pdf" className="w-full h-full min-h-[340px] rounded-[8px]" />
+                      <embed src={docPreview.rawUrl || docPreview.base64} type="application/pdf" className="w-full h-full min-h-[340px] rounded-[8px]" />
                     ) : (
-                      <img src={docPreview.base64} alt={docPreview.filename} className="max-w-full mx-auto rounded-[8px]" />
+                      <img src={docPreview.rawUrl || docPreview.base64} alt={docPreview.filename} className="max-w-full mx-auto rounded-[8px]" />
                     )
                   ) : (
                     <div className="h-full grid place-items-center text-[12px] text-[var(--dim)]">Đang tải chứng từ...</div>
@@ -946,30 +1046,63 @@ export function TransactionsPage({
             )}
           </div>
 
-          <select
-            value={categoryCode}
-            onChange={(e) => setCategoryCode(e.target.value)}
-            className="h-[30px] px-2.5 rounded-full border border-[var(--line)] bg-[var(--panel)] text-[12px] outline-none max-w-[135px]"
-          >
-            <option value="" className="bg-[var(--panel-solid)]">Mọi danh mục</option>
-            {categories.map((c) => (
-              <option key={String(c.code)} value={String(c.code)} className="bg-[var(--panel-solid)]">
-                {String(c.name)}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={complianceFilter}
-            onChange={(e) => setComplianceFilter(e.target.value)}
-            className="h-[30px] px-2.5 rounded-full border border-[var(--line)] bg-[var(--panel)] text-[12px] outline-none max-w-[130px]"
-          >
-            <option value="" className="bg-[var(--panel-solid)]">Mọi trạng thái</option>
-            <option value="valid" className="bg-[var(--panel-solid)]">Hợp lệ</option>
-            <option value="warning" className="bg-[var(--panel-solid)]">Cảnh báo</option>
-            <option value="error" className="bg-[var(--panel-solid)]">Lỗi</option>
-            <option value="warning_or_error" className="bg-[var(--panel-solid)]">Cảnh báo / Lỗi</option>
-          </select>
+          <div className="relative" ref={filterMenuRef}>
+            <button
+              type="button"
+              onClick={() => setShowFilterMenu((v) => !v)}
+              className={`gb ${categoryCode || complianceFilter ? "hl" : ""}`}
+            >
+              <Filter size={12.5} />
+              <span>Bộ lọc{(categoryCode ? 1 : 0) + (complianceFilter ? 1 : 0) > 0 ? ` (${(categoryCode ? 1 : 0) + (complianceFilter ? 1 : 0)})` : ""}</span>
+              <ChevronDown size={11.5} />
+            </button>
+            {showFilterMenu && (
+              <div className="menu absolute left-0 top-9 w-[250px] p-3 space-y-2.5 z-40">
+                <div>
+                  <label className="block text-[10.5px] uppercase tracking-wider text-[var(--dim)] mb-1">Danh mục kế toán</label>
+                  <select
+                    value={categoryCode}
+                    onChange={(e) => setCategoryCode(e.target.value)}
+                    className="w-full h-8 px-2.5 rounded-[8px] border border-[var(--line)] bg-[var(--raised)] text-[12px] outline-none"
+                  >
+                    <option value="" className="bg-[var(--panel-solid)]">Mọi danh mục</option>
+                    {categories.map((c) => (
+                      <option key={String(c.code)} value={String(c.code)} className="bg-[var(--panel-solid)]">
+                        {String(c.name)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10.5px] uppercase tracking-wider text-[var(--dim)] mb-1">Trạng thái tuân thủ</label>
+                  <select
+                    value={complianceFilter}
+                    onChange={(e) => setComplianceFilter(e.target.value)}
+                    className="w-full h-8 px-2.5 rounded-[8px] border border-[var(--line)] bg-[var(--raised)] text-[12px] outline-none"
+                  >
+                    <option value="" className="bg-[var(--panel-solid)]">Mọi trạng thái</option>
+                    <option value="valid" className="bg-[var(--panel-solid)]">Hợp lệ</option>
+                    <option value="warning" className="bg-[var(--panel-solid)]">Cảnh báo</option>
+                    <option value="error" className="bg-[var(--panel-solid)]">Lỗi</option>
+                    <option value="warning_or_error" className="bg-[var(--panel-solid)]">Cảnh báo / Lỗi</option>
+                  </select>
+                </div>
+                {(categoryCode || complianceFilter) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCategoryCode("")
+                      setComplianceFilter("")
+                      setShowFilterMenu(false)
+                    }}
+                    className="w-full h-7 rounded-[7px] text-[11.5px] text-[var(--rose)] hover:bg-[var(--rose-s)]"
+                  >
+                    Đặt lại bộ lọc
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -1065,7 +1198,7 @@ export function TransactionsPage({
           {viewMode === "list" ? (
             <div ref={parentRef} className="flex-1 min-h-0 overflow-auto">
               <div style={{ minWidth: `${minTableWidth}px` }}>
-                <div className="sticky top-0 z-10 flex items-center px-3.5 h-9 bg-[var(--raised)] border-b border-[var(--line)] text-[10.5px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                <div className="sticky top-0 z-10 flex items-center px-3.5 h-9 bg-[var(--panel-solid)] border-b border-[var(--line)] text-[10.5px] font-semibold uppercase tracking-wider text-[var(--muted)]">
                   <div className="w-7 shrink-0">
                     <input
                       type="checkbox"
@@ -1106,27 +1239,29 @@ export function TransactionsPage({
                       <SortIcon col="merchant" />
                     </button>
                   )}
-                  {visibleCols.includes("name") && <div className="flex-1 min-w-[140px]">Nội dung</div>}
+                  {visibleCols.includes("name") && <div className="flex-1 min-w-[150px]">Nội dung</div>}
                   {visibleCols.includes("categoryCode") && <div className="w-[118px] shrink-0">Danh mục</div>}
+                  {visibleCols.includes("complianceStatus") && (
+                    <div className="w-[92px] pr-2 text-center shrink-0">Tuân thủ</div>
+                  )}
                   {extraFieldsVisible.map((ef) => (
                     <div key={String(ef.code)} className="w-[115px] shrink-0 truncate pr-2">
                       {String(ef.name)}
                     </div>
                   ))}
-                  {visibleCols.includes("preTaxAmount") && <div className="w-[95px] text-right shrink-0">Trước thuế</div>}
-                  {visibleCols.includes("vatAmount") && <div className="w-[80px] text-right shrink-0">VAT</div>}
+                  {visibleCols.includes("preTaxAmount") && <div className="w-[95px] pr-2 text-right shrink-0">Trước thuế</div>}
+                  {visibleCols.includes("vatAmount") && <div className="w-[80px] pr-2 text-right shrink-0">VAT</div>}
                   {visibleCols.includes("totalAmount") && (
                     <button
                       type="button"
                       onClick={() => toggleSort("totalAmount")}
-                      className="w-[110px] shrink-0 flex items-center justify-end gap-1 hover:text-[var(--text)]"
+                      className={`w-[124px] h-full shrink-0 flex items-center justify-end gap-1 hover:text-[var(--text)] ${
+                        editingTx && isLg ? "sticky right-0 z-20 bg-[var(--panel-solid)] border-l border-[var(--line)] pl-3 pr-1" : ""
+                      }`}
                     >
                       <SortIcon col="totalAmount" />
                       <span>Tổng cộng</span>
                     </button>
-                  )}
-                  {visibleCols.includes("complianceStatus") && (
-                    <div className="w-[92px] pr-1 text-right shrink-0">Tuân thủ</div>
                   )}
                 </div>
 
@@ -1178,7 +1313,7 @@ export function TransactionsPage({
                           </div>
                         )}
                         {visibleCols.includes("name") && (
-                          <div className="flex-1 min-w-[140px] pr-2 truncate text-[var(--text)]">{r.name || "—"}</div>
+                          <div className="flex-1 min-w-[150px] pr-2 truncate text-[var(--text)]">{r.name || "—"}</div>
                         )}
                         {visibleCols.includes("categoryCode") && (
                           <div className="w-[118px] shrink-0">
@@ -1188,33 +1323,8 @@ export function TransactionsPage({
                             </span>
                           </div>
                         )}
-                        {extraFieldsVisible.map((ef) => (
-                          <div key={String(ef.code)} className="w-[115px] shrink-0 truncate pr-2 text-[11.5px] text-[var(--muted)]">
-                            {extraParsed[String(ef.code)] || "—"}
-                          </div>
-                        ))}
-                        {visibleCols.includes("preTaxAmount") && (
-                          <div className="w-[95px] text-right shrink-0 tnum text-[var(--muted)]">
-                            {formatMoney(r.preTaxAmount, r.currencyCode)}
-                          </div>
-                        )}
-                        {visibleCols.includes("vatAmount") && (
-                          <div className="w-[80px] text-right shrink-0 tnum text-[var(--muted)]">
-                            {formatMoney(r.vatAmount, r.currencyCode)}
-                          </div>
-                        )}
-                        {visibleCols.includes("totalAmount") && (
-                          <div
-                            className={`w-[110px] text-right shrink-0 tnum font-semibold ${
-                              r.direction === "output" ? "text-[var(--green)]" : "text-[var(--text)]"
-                            }`}
-                          >
-                            {r.direction === "output" ? "+" : ""}
-                            {formatMoney(r.totalAmount, r.currencyCode)}
-                          </div>
-                        )}
                         {visibleCols.includes("complianceStatus") && (
-                          <div className="w-[92px] pr-1 text-right shrink-0">
+                          <div className="w-[92px] pr-2 text-center shrink-0">
                             <span
                               className={`tag ${
                                 r.complianceStatus === "valid"
@@ -1226,6 +1336,35 @@ export function TransactionsPage({
                             >
                               {r.complianceStatus === "valid" ? "Hợp lệ" : r.complianceStatus === "warning" ? "Cảnh báo" : "Lỗi"}
                             </span>
+                          </div>
+                        )}
+                        {extraFieldsVisible.map((ef) => (
+                          <div key={String(ef.code)} className="w-[115px] shrink-0 truncate pr-2 text-[11.5px] text-[var(--muted)]">
+                            {extraParsed[String(ef.code)] || "—"}
+                          </div>
+                        ))}
+                        {visibleCols.includes("preTaxAmount") && (
+                          <div className="w-[95px] pr-2 text-right shrink-0 tnum text-[var(--muted)]">
+                            {formatMoney(r.preTaxAmount, r.currencyCode)}
+                          </div>
+                        )}
+                        {visibleCols.includes("vatAmount") && (
+                          <div className="w-[80px] pr-2 text-right shrink-0 tnum text-[var(--muted)]">
+                            {formatMoney(r.vatAmount, r.currencyCode)}
+                          </div>
+                        )}
+                        {visibleCols.includes("totalAmount") && (
+                          <div
+                            className={`w-[124px] h-full flex items-center justify-end shrink-0 tnum font-semibold ${
+                              r.direction === "output" ? "text-[var(--green)]" : "text-[var(--text)]"
+                            } ${
+                              editingTx && isLg
+                                ? "sticky right-0 z-[5] bg-[var(--panel-solid)] border-l border-[var(--line)] pl-3 pr-1"
+                                : ""
+                            }`}
+                          >
+                            {r.direction === "output" ? "+" : ""}
+                            {formatMoney(r.totalAmount, r.currencyCode)}
                           </div>
                         )}
                       </div>
@@ -1309,11 +1448,21 @@ export function TransactionsPage({
           </div>
         </div>
 
-        {/* Desktop Docked Split-Pane Inspector (no full-screen backdrop!) */}
+        {/* Resizable Desktop Docked Split-Pane Inspector (no full-screen backdrop!) */}
         {editingTx && isLg && (
-          <aside className="flex w-[420px] xl:w-[460px] shrink-0 border-l border-[var(--line)] bg-[var(--sheet-bg)] flex-col min-h-0">
-            {inspectorBody}
-          </aside>
+          <>
+            <div
+              onPointerDown={startInspectorResize}
+              className="w-1.5 shrink-0 bg-[var(--line)] hover:bg-[var(--cyan)] cursor-col-resize transition-colors"
+              title="Kéo để thay đổi chiều rộng Inspector"
+            />
+            <aside
+              style={{ width: `${inspectorWidth}px` }}
+              className="flex shrink-0 bg-[var(--sheet-bg)] flex-col min-h-0"
+            >
+              {inspectorBody}
+            </aside>
+          </>
         )}
       </div>
 

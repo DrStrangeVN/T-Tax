@@ -5,9 +5,9 @@ import { useTransport, smartIngestFileList } from "./transport/client.js"
 import { LiquidShell, type NavPage } from "./components/LiquidShell.js"
 import { CommandPalette } from "./components/CommandPalette.js"
 import { DashboardPage } from "./pages/DashboardPage.js"
-import { UnsortedPage } from "./pages/UnsortedPage.js"
-import { TransactionsPage } from "./pages/TransactionsPage.js"
 
+const UnsortedPage = lazy(() => import("./pages/UnsortedPage.js").then((m) => ({ default: m.UnsortedPage })))
+const TransactionsPage = lazy(() => import("./pages/TransactionsPage.js").then((m) => ({ default: m.TransactionsPage })))
 const BatchConverterPage = lazy(() => import("./pages/BatchConverterPage.js").then((m) => ({ default: m.BatchConverterPage })))
 const AccountingPage = lazy(() => import("./pages/AccountingPage.js").then((m) => ({ default: m.AccountingPage })))
 const CounterpartiesPage = lazy(() => import("./pages/CounterpartiesPage.js").then((m) => ({ default: m.CounterpartiesPage })))
@@ -74,7 +74,17 @@ export function TTaxApp() {
   } | null>(null)
 
   const [txCompliancePreset, setTxCompliancePreset] = useState<string>("")
+  const [txCategoryPreset, setTxCategoryPreset] = useState<string>("")
+  const [txDateFromPreset, setTxDateFromPreset] = useState<string>("")
+  const [txDateToPreset, setTxDateToPreset] = useState<string>("")
+  const [txOpenNewSignal, setTxOpenNewSignal] = useState(0)
+  const [txInspectorOpen, setTxInspectorOpen] = useState(false)
   const [focusTxId, setFocusTxId] = useState<string | null>(null)
+  const [accountingTabPreset, setAccountingTabPreset] = useState<
+    "journal" | "trial_balance" | "vat" | "hkd" | "bank" | undefined
+  >(undefined)
+  const [accountingNewModalSignal, setAccountingNewModalSignal] = useState(0)
+  const [counterpartySearchPreset, setCounterpartySearchPreset] = useState("")
   const [openNewWsSignal, setOpenNewWsSignal] = useState(0)
 
   const quickFileInputRef = useRef<HTMLInputElement>(null)
@@ -115,10 +125,13 @@ export function TTaxApp() {
     }
   }, [activeWsId, transport])
 
-  // Auto Focus Rail (< 1440px) when opening multi-pane invoice/XML workbenches
+  // Auto Focus Rail (< 1440px) when opening multi-pane invoice/XML/inspector workbenches
   useEffect(() => {
     if (userPinnedSidebarRef.current || sidebarMode === "collapsed") return
-    const isDenseWorkbench = activePage === "unsorted" || activePage === "converter"
+    const isDenseWorkbench =
+      activePage === "unsorted" ||
+      activePage === "converter" ||
+      (activePage === "transactions" && txInspectorOpen)
     if (isDenseWorkbench && window.innerWidth < 1440 && sidebarMode === "expanded") {
       autoRailAppliedRef.current = true
       setSidebarMode("rail")
@@ -126,7 +139,7 @@ export function TTaxApp() {
       autoRailAppliedRef.current = false
       setSidebarMode("expanded")
     }
-  }, [activePage, sidebarMode])
+  }, [activePage, sidebarMode, txInspectorOpen])
 
   const loadWorkspaces = useCallback(async () => {
     const list = await transport.listWorkspaces()
@@ -299,12 +312,21 @@ export function TTaxApp() {
         onNavigate={(p) => {
           if (p !== "transactions") {
             setTxCompliancePreset("")
+            setTxCategoryPreset("")
+            setTxDateFromPreset("")
+            setTxDateToPreset("")
+            setTxInspectorOpen(false)
             setFocusTxId(null)
           }
+          if (p !== "accounting") setAccountingTabPreset(undefined)
+          if (p !== "counterparties") setCounterpartySearchPreset("")
           setActivePage(p)
         }}
         onOpenComplianceAlerts={() => {
           setTxCompliancePreset("warning_or_error")
+          setTxCategoryPreset("")
+          setTxDateFromPreset("")
+          setTxDateToPreset("")
           setFocusTxId(null)
           setActivePage("transactions")
         }}
@@ -344,6 +366,24 @@ export function TTaxApp() {
                 setFocusTxId(id)
                 setActivePage("transactions")
               }}
+              onDrillPeriod={(from, to) => {
+                setTxDateFromPreset(from)
+                setTxDateToPreset(to)
+                setTxCategoryPreset("")
+                setTxCompliancePreset("")
+                setActivePage("transactions")
+              }}
+              onDrillCategory={(code) => {
+                setTxCategoryPreset(code)
+                setTxCompliancePreset("")
+                setTxDateFromPreset("")
+                setTxDateToPreset("")
+                setActivePage("transactions")
+              }}
+              onOpenVatReport={() => {
+                setAccountingTabPreset("vat")
+                setActivePage("accounting")
+              }}
               onRefreshCounts={refreshCounts}
               onToast={showToast}
             />
@@ -355,9 +395,17 @@ export function TTaxApp() {
             <TransactionsPage
               workspace={activeWorkspace}
               initialComplianceFilter={txCompliancePreset}
+              initialCategoryFilter={txCategoryPreset}
+              initialDateFrom={txDateFromPreset}
+              initialDateTo={txDateToPreset}
+              openNewSignal={txOpenNewSignal}
               initialFocusTxId={focusTxId}
+              onInspectorOpenChange={setTxInspectorOpen}
               onClearPreset={() => {
                 setTxCompliancePreset("")
+                setTxCategoryPreset("")
+                setTxDateFromPreset("")
+                setTxDateToPreset("")
                 setFocusTxId(null)
               }}
               onRefreshCounts={refreshCounts}
@@ -368,14 +416,34 @@ export function TTaxApp() {
             <BatchConverterPage workspace={activeWorkspace} onRefreshCounts={refreshCounts} onToast={showToast} />
           )}
           {activePage === "accounting" && (
-            <AccountingPage workspace={activeWorkspace} onRefreshCounts={refreshCounts} onToast={showToast} />
+            <AccountingPage
+              workspace={activeWorkspace}
+              initialTab={accountingTabPreset}
+              openNewVoucherSignal={accountingNewModalSignal}
+              onRefreshCounts={refreshCounts}
+              onToast={showToast}
+            />
           )}
-          {activePage === "counterparties" && <CounterpartiesPage workspace={activeWorkspace} onToast={showToast} />}
+          {activePage === "counterparties" && (
+            <CounterpartiesPage
+              workspace={activeWorkspace}
+              initialSearch={counterpartySearchPreset}
+              onToast={showToast}
+            />
+          )}
           {activePage === "apps" && (
             <MiniAppsPage workspace={activeWorkspace} onRefreshCounts={refreshCounts} onToast={showToast} />
           )}
           {activePage === "vault" && (
-            <VaultPage workspace={activeWorkspace} onRefreshCounts={refreshCounts} onToast={showToast} />
+            <VaultPage
+              workspace={activeWorkspace}
+              onOpenTransaction={(id) => {
+                setFocusTxId(id)
+                setActivePage("transactions")
+              }}
+              onRefreshCounts={refreshCounts}
+              onToast={showToast}
+            />
           )}
           {activePage === "settings" && (
             <SettingsPage
@@ -411,6 +479,23 @@ export function TTaxApp() {
         onOpenTransaction={(id) => {
           setFocusTxId(id)
           setActivePage("transactions")
+        }}
+        onOpenCounterparty={(mst) => {
+          setCounterpartySearchPreset(mst)
+          setActivePage("counterparties")
+        }}
+        onCreateTransaction={() => {
+          setTxOpenNewSignal((n) => n + 1)
+          setActivePage("transactions")
+        }}
+        onCreateJournalVoucher={() => {
+          setAccountingTabPreset("journal")
+          setAccountingNewModalSignal((n) => n + 1)
+          setActivePage("accounting")
+        }}
+        onOpenAccountingTab={(t) => {
+          setAccountingTabPreset(t)
+          setActivePage("accounting")
         }}
         workspaceId={activeWorkspace.id}
         workspaces={workspaces}

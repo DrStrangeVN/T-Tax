@@ -99,9 +99,12 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
 
     await page.screenshot({ path: join(shotDir, "01-dashboard-dark.png") })
 
-    // 2. Test Command Palette (⌘K / Ctrl+K)
+    // 2. Test Command Palette (⌘K / Ctrl+K) + Vietnamese diacritic-insensitive match
     await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k")
     await expect(page.locator(".pal")).toBeVisible()
+    await page.locator('.pal input[type="text"], .pal input:not([type])').first().fill("phieu ke toan")
+    await expect(page.locator('.pal >> text=Tạo phiếu kế toán').first()).toBeVisible({ timeout: 5_000 })
+    await page.locator('.pal input[type="text"], .pal input:not([type])').first().fill("")
     await page.screenshot({ path: join(shotDir, "02-command-palette.png") })
     await page.keyboard.press("Escape")
 
@@ -130,11 +133,12 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator("text=Hộp thư chứng từ đang sạch")).toBeVisible({ timeout: 10_000 })
     await expect(page.locator('button:has-text("Hoàn tác")').first()).toBeVisible({ timeout: 5_000 })
 
-    // 5. Verify Transaction Ledger, Summary Footer & Docked Split-Pane Right Inspector
+    // 5. Verify Transaction Ledger, Bộ lọc, Sticky Tổng cộng & Docked Split-Pane Right Inspector
     await page.click('[data-nav="transactions"]')
     await expect(page.locator("text=00004321")).toBeVisible({ timeout: 10_000 })
     await expect(page.locator("text=0312000111")).toBeVisible()
-    await expect(page.locator("text=Tổng bộ lọc:")).toBeVisible()
+    await expect(page.locator('button:has-text("Bộ lọc")').first()).toBeVisible()
+    await expect(page.locator('button:has-text("Tổng cộng")').first()).toBeVisible()
     await page.locator("text=00004321").first().click()
     await expect(page.locator('button:has-text("Định khoản")').first()).toBeVisible({ timeout: 10_000 })
     await page.click('button:has-text("Mặt hàng & Cảnh báo")')
@@ -142,7 +146,7 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await page.screenshot({ path: join(shotDir, "04-transactions-ledger.png") })
     await page.keyboard.press("Escape")
 
-    // 6. Verify Accounting VAS Journal Entry, Trial Balance & Balance Pill
+    // 6. Verify Accounting VAS Journal Entry, Trial Balance & Account Ledger Drawer
     await page.click('[data-nav="accounting"]')
     await expect(page.locator("h1")).toContainText("Kế toán", { timeout: 10_000 })
     await expect(page.locator('input[value="1331"]').first()).toBeVisible({ timeout: 10_000 })
@@ -151,6 +155,10 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await page.click('button:has-text("Cân đối Tài khoản")')
     await expect(page.locator("text=Tổng Cân đối Tài khoản").first()).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "05b-accounting-trial-balance.png") })
+    await page.locator('tbody tr:has-text("1331")').first().click()
+    await expect(page.locator("text=Sổ chi tiết Tài khoản 1331").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "05c-accounting-ledger-drawer.png") })
+    await page.keyboard.press("Escape")
 
     // Test Command Palette FTS5 Search after tx committed
     await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k")
@@ -158,7 +166,7 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator('.pal >> text=00004321').first()).toBeVisible({ timeout: 5_000 })
     await page.keyboard.press("Escape")
 
-    // 7. Batch Converter XML scan & preview
+    // 7. Batch Converter XML scan, selection & preview
     await page.click('[data-nav="converter"]')
     const batchInput = page.locator('main input[type="file"][accept*=".xml"]').first()
     await batchInput.setInputFiles({
@@ -167,6 +175,7 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
       buffer: Buffer.from(SAMPLE_XML, "utf8")
     })
     await expect(page.locator("text=00004321").first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('button:has-text("Ghi sổ")').first()).toBeVisible()
     await page.click('main button:has-text("Xem")')
     await expect(page.locator('iframe[title="iTaxViewer Preview"]')).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "07-converter.png") })
@@ -184,9 +193,13 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator('iframe[title="Outgoing Invoice Preview"]')).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "09-miniapps-invoice-vietqr.png") })
 
-    // 10. Vault & Settings (including Period Lock)
+    // 10. Vault Master-Detail & Settings (including Period Lock)
     await page.click('[data-nav="vault"]')
     await expect(page.locator("text=HD_00004321.xml").first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('button:has-text("Đã gắn sổ")').first()).toBeVisible()
+    await page.locator("text=HD_00004321.xml").first().click()
+    await expect(page.locator('iframe[title="Vault XML Preview"], pre').first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "09b-vault.png") })
     await page.click('[data-nav="settings"]')
     await expect(page.locator("text=Thông tin Pháp nhân & Chế độ Kế toán")).toBeVisible({ timeout: 10_000 })
     await expect(page.locator("text=Khóa sổ Kỳ kế toán").first()).toBeVisible({ timeout: 5_000 })

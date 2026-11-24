@@ -17,6 +17,8 @@ export interface UiPreferences {
   activeWorkspaceId?: string
   visibleCols?: string[]
   unsortedSplitPct?: number
+  txInspectorWidth?: number
+  batchSplitPct?: number
   hkdSector?: HkdTaxSectorCode
 }
 
@@ -36,6 +38,33 @@ export interface TrialBalanceRow {
   periodCredit: number
   closingDebit: number
   closingCredit: number
+}
+
+export interface OpeningBalanceRow {
+  accountCode: string
+  openingDebit: number
+  openingCredit: number
+}
+
+export interface AccountLedgerRow {
+  entryId: string
+  voucherNo: string
+  voucherDate: string
+  description: string
+  counterAccount: string
+  debitAmount: number
+  creditAmount: number
+  runningBalance: number
+  transactionId?: string | null
+}
+
+export interface BankMatchItem {
+  transactionId: string
+  allocatedAmountVnd: number
+  merchant?: string | null
+  invoiceNumber?: string | null
+  issuedAt?: string | null
+  totalAmount?: number
 }
 
 export interface BatchAnalyzeProgressEvent {

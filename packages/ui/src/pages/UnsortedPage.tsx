@@ -18,7 +18,8 @@ import {
   CheckSquare,
   X,
   ArrowLeftRight,
-  Maximize2
+  Maximize2,
+  ChevronDown
 } from "lucide-react"
 import type {
   BatchAnalyzeProgressEvent,
@@ -97,7 +98,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
 
   const [previewMode, setPreviewMode] = useState<"primary" | "paired_pdf">("primary")
-  const [previewData, setPreviewData] = useState<{ base64?: string; xmlHtml?: string; pairedBase64?: string }>({})
+  const [previewData, setPreviewData] = useState<{ base64?: string; rawUrl?: string; xmlHtml?: string; pairedBase64?: string; pairedUrl?: string }>({})
   const [fitWidth, setFitWidth] = useState(true)
   const [zoomPct, setZoomPct] = useState(100)
   const [rotateDeg, setRotateDeg] = useState(0)
@@ -108,6 +109,8 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
   const splitContainerRef = useRef<HTMLDivElement | null>(null)
 
   const [analysis, setAnalysis] = useState<DocumentAnalysisOutcome | null>(null)
+  const [showAuditDetails, setShowAuditDetails] = useState(false)
+  const [debitAccountOverride, setDebitAccountOverride] = useState("")
   const [categories, setCategories] = useState<Array<Record<string, unknown>>>([])
   const [projects, setProjects] = useState<Array<Record<string, unknown>>>([])
   const [extraFields, setExtraFields] = useState<Array<Record<string, unknown>>>([])
@@ -222,6 +225,8 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
         extra: {}
       })
       setFxEstimate(null)
+      setDebitAccountOverride("")
+      setShowAuditDetails(Boolean(outcome.auditIssues?.some((i) => i.severity === "error")))
     },
     [workspace.baseCurrency]
   )
@@ -238,19 +243,25 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
     setZoomPct(100)
     setRotateDeg(0)
     setPreviewData({})
+    setDebitAccountOverride("")
 
-    transport
-      .readFilePreview(workspace.id, selectedId)
-      .then(async (res) => {
-        if (!active) return
-        if (file.filename.toLowerCase().endsWith(".xml")) {
-          const html = await transport.renderXmlHtmlPreview(workspace.id, selectedId)
+    if (file.filename.toLowerCase().endsWith(".xml")) {
+      transport
+        .renderXmlHtmlPreview(workspace.id, selectedId)
+        .then((html) => {
           if (active) setPreviewData({ xmlHtml: html })
-        } else {
-          setPreviewData({ base64: res.base64 })
-        }
-      })
-      .catch(() => {})
+        })
+        .catch(() => {})
+    } else if (transport.getFileRawUrl) {
+      setPreviewData({ rawUrl: transport.getFileRawUrl(workspace.id, selectedId) })
+    } else {
+      transport
+        .readFilePreview(workspace.id, selectedId)
+        .then((res) => {
+          if (active) setPreviewData({ base64: res.base64 })
+        })
+        .catch(() => {})
+    }
 
     if (file.cachedParseResultJson) {
       try {
@@ -265,6 +276,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       }
     }
     setAnalysis(null)
+    setShowAuditDetails(false)
     setForm((prev) => ({ ...prev, name: file.filename }))
     return () => {
       active = false
@@ -272,7 +284,12 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
   }, [selectedId, files, workspace.id, transport, applyOutcomeToForm])
 
   const loadPairedPdf = async (pairedFileId: string) => {
-    if (previewData.pairedBase64) {
+    if (previewData.pairedUrl || previewData.pairedBase64) {
+      setPreviewMode("paired_pdf")
+      return
+    }
+    if (transport.getFileRawUrl) {
+      setPreviewData((prev) => ({ ...prev, pairedUrl: transport.getFileRawUrl!(workspace.id, pairedFileId) }))
       setPreviewMode("paired_pdf")
       return
     }
@@ -401,6 +418,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       const nextPreferred = filteredFiles[curIdx + 1]?.id ?? filteredFiles[curIdx - 1]?.id ?? null
       const createdTx = await transport.approveFileToTransaction(workspace.id, approvedFileId, {
         ...form,
+        debitAccountOverride: debitAccountOverride.trim() || undefined,
         items: analysis?.items ?? []
       })
       onRefreshCounts()
@@ -549,6 +567,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       direction: form.direction,
       categoryCode: form.categoryCode,
       categoryDefaultDebit: selectedCatObj?.defaultDebitAccount ? String(selectedCatObj.defaultDebitAccount) : undefined,
+      counterpartyDefaultAccount: debitAccountOverride.trim() || undefined,
       paymentMethod: form.paymentMethod,
       preTaxAmount: Math.round(form.preTaxAmount * rate),
       vatAmount: Math.round(form.vatAmount * rate),
@@ -558,7 +577,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       invoiceNumber: form.invoiceNumber
     })
     return { lines, check: verifyJournalBalance(lines) }
-  }, [workspace.accountingRegime, form, selectedCatObj, fxEstimate])
+  }, [workspace.accountingRegime, form, selectedCatObj, fxEstimate, debitAccountOverride])
 
   const provBadge = (fieldCode: string) => {
     const p = analysis?.provenance?.[fieldCode]
@@ -790,9 +809,9 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       </div>
 
       <div ref={viewerSurfaceRef} className="flex-1 min-h-0 overflow-auto p-3 bg-[var(--outer-rail)]">
-        {previewMode === "paired_pdf" && previewData.pairedBase64 ? (
+        {previewMode === "paired_pdf" && (previewData.pairedUrl || previewData.pairedBase64) ? (
           <embed
-            src={previewData.pairedBase64}
+            src={previewData.pairedUrl || previewData.pairedBase64}
             type="application/pdf"
             className="w-full h-full min-h-[520px] rounded-[10px]"
           />
@@ -816,16 +835,16 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
               className="rounded-[10px] bg-white border border-[var(--line)] block"
             />
           </div>
-        ) : previewData.base64 ? (
+        ) : previewData.rawUrl || previewData.base64 ? (
           selectedFile?.mimetype === "application/pdf" ? (
             <embed
-              src={previewData.base64}
+              src={previewData.rawUrl || previewData.base64}
               type="application/pdf"
               className="w-full h-full min-h-[520px] rounded-[10px]"
             />
           ) : (
             <img
-              src={previewData.base64}
+              src={previewData.rawUrl || previewData.base64}
               alt={selectedFile?.filename}
               style={{
                 width: fitWidth ? "100%" : `${zoomPct}%`,
@@ -894,24 +913,45 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
           </div>
         </div>
 
-        {/* Audit Alerts */}
+        {/* Compact Collapsible Audit Alerts */}
         {analysis && analysis.auditIssues.length > 0 && (
           <div className="space-y-1.5">
-            {analysis.auditIssues.map((iss, idx) => (
-              <div
-                key={idx}
-                className={`px-3 py-2 rounded-[10px] border text-[11.5px] flex items-start gap-2 ${
-                  iss.severity === "error"
-                    ? "bg-[var(--rose-s)] border-[var(--rose)]/30 text-[var(--rose)]"
-                    : iss.severity === "warning"
-                      ? "bg-[var(--amber-s)] border-[var(--amber)]/30 text-[var(--amber)]"
-                      : "bg-[var(--cyan-s)] border-[var(--cyan)]/30 text-[var(--cyan)]"
-                }`}
-              >
-                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-                <span>{iss.message}</span>
+            <button
+              type="button"
+              onClick={() => setShowAuditDetails((v) => !v)}
+              className={`w-full px-3 py-1.5 rounded-[10px] border text-[11.5px] flex items-center justify-between gap-2 ${
+                analysis.auditIssues.some((i) => i.severity === "error")
+                  ? "bg-[var(--rose-s)] border-[var(--rose)]/30 text-[var(--rose)]"
+                  : "bg-[var(--amber-s)] border-[var(--amber)]/30 text-[var(--amber)]"
+              }`}
+            >
+              <span className="flex items-center gap-1.5 font-medium truncate">
+                <AlertTriangle size={13.5} className="shrink-0" />
+                <span className="truncate">
+                  {analysis.auditIssues.length} lưu ý tuân thủ · {analysis.auditIssues[0]?.message}
+                </span>
+              </span>
+              <ChevronDown size={13} className={`shrink-0 transition-transform ${showAuditDetails ? "rotate-180" : ""}`} />
+            </button>
+            {showAuditDetails && (
+              <div className="space-y-1">
+                {analysis.auditIssues.map((iss, idx) => (
+                  <div
+                    key={idx}
+                    className={`px-3 py-1.5 rounded-[9px] border text-[11px] flex items-start gap-2 ${
+                      iss.severity === "error"
+                        ? "bg-[var(--rose-s)] border-[var(--rose)]/30 text-[var(--rose)]"
+                        : iss.severity === "warning"
+                          ? "bg-[var(--amber-s)] border-[var(--amber)]/30 text-[var(--amber)]"
+                          : "bg-[var(--cyan-s)] border-[var(--cyan)]/30 text-[var(--cyan)]"
+                    }`}
+                  >
+                    <AlertTriangle size={12.5} className="shrink-0 mt-0.5" />
+                    <span>{iss.message}</span>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         )}
 
@@ -945,8 +985,8 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
 
             <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
               <div>
-                <div className="flex items-center justify-between gap-1 mb-1">
-                  <label className="text-[11px] font-medium text-[var(--muted)] truncate">Mã số thuế</label>
+                <div className="h-5 flex items-center justify-between gap-1 mb-1">
+                  <label className="text-[11px] font-medium text-[var(--muted)] whitespace-nowrap">MST</label>
                   {provBadge("merchantTaxCode")}
                 </div>
                 <input
@@ -956,7 +996,9 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-medium text-[var(--muted)] mb-1">Ký hiệu HĐ</label>
+                <div className="h-5 flex items-center mb-1">
+                  <label className="text-[11px] font-medium text-[var(--muted)] whitespace-nowrap">Ký hiệu HĐ</label>
+                </div>
                 <input
                   value={form.invoiceSymbol}
                   onChange={(e) => setForm({ ...form, invoiceSymbol: e.target.value })}
@@ -964,7 +1006,9 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-medium text-[var(--muted)] mb-1">Số hóa đơn</label>
+                <div className="h-5 flex items-center mb-1">
+                  <label className="text-[11px] font-medium text-[var(--muted)] whitespace-nowrap">Số hóa đơn</label>
+                </div>
                 <input
                   value={form.invoiceNumber}
                   onChange={(e) => setForm({ ...form, invoiceNumber: e.target.value })}
@@ -1013,7 +1057,35 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
           <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--dim)]">Tiền tệ & Thuế GTGT</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <div>
-              <label className="block text-[11px] font-medium text-[var(--muted)] mb-1">Thuế suất GTGT</label>
+              <div className="h-5 flex items-center justify-between gap-1 mb-1">
+                <label className="text-[11px] font-medium text-[var(--muted)] whitespace-nowrap">Thuế suất</label>
+                <div className="flex items-center gap-1 text-[10px]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const pct = parseFloat(form.vatRateCode) || 0
+                      const nextVat = Math.round((form.preTaxAmount * pct) / 100)
+                      setForm((prev) => ({ ...prev, vatAmount: nextVat, totalAmount: prev.preTaxAmount + nextVat }))
+                    }}
+                    className="px-1.5 py-0.5 rounded bg-[var(--raised)] border border-[var(--line)] text-[var(--cyan)] hover:border-[var(--cyan)] whitespace-nowrap"
+                    title="Tính VAT xuôi từ Tiền trước thuế"
+                  >
+                    Tính VAT
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const pct = parseFloat(form.vatRateCode) || 0
+                      const pre = Math.round(form.totalAmount / (1 + pct / 100))
+                      setForm((prev) => ({ ...prev, preTaxAmount: pre, vatAmount: prev.totalAmount - pre }))
+                    }}
+                    className="px-1.5 py-0.5 rounded bg-[var(--raised)] border border-[var(--line)] text-[var(--muted)] hover:text-[var(--text)] whitespace-nowrap"
+                    title="Tách ngược Tiền trước thuế & VAT từ Tổng thanh toán"
+                  >
+                    Tách ngược
+                  </button>
+                </div>
+              </div>
               <select
                 value={form.vatRateCode}
                 onChange={(e) => setForm({ ...form, vatRateCode: e.target.value })}
@@ -1028,7 +1100,9 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
             </div>
 
             <div>
-              <label className="block text-[11px] font-medium text-[var(--muted)] mb-1">Tiền tệ</label>
+              <div className="h-5 flex items-center mb-1">
+                <label className="text-[11px] font-medium text-[var(--muted)] whitespace-nowrap">Tiền tệ</label>
+              </div>
               <div className="flex gap-1.5">
                 <select
                   value={form.currencyCode}
@@ -1164,12 +1238,21 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
           </div>
 
           {liveJournalPreview.lines.length > 0 && (
-            <div className="pt-2 border-t border-[var(--line)] space-y-1">
+            <div className="pt-2 border-t border-[var(--line)] space-y-1.5">
               <div className="flex items-center justify-between text-[11px]">
                 <span className="font-medium text-[var(--muted)]">Định khoản dự kiến ({workspace.accountingRegime})</span>
-                <span className={liveJournalPreview.check.balanced ? "text-[var(--green)] tnum" : "text-[var(--amber)] tnum"}>
-                  ∑ {formatMoney(liveJournalPreview.check.totalAmountVnd, workspace.baseCurrency)}
-                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    value={debitAccountOverride}
+                    onChange={(e) => setDebitAccountOverride(e.target.value)}
+                    placeholder="Ghi đè TK chi phí..."
+                    className="w-[104px] h-6 px-2 rounded-[6px] bg-[var(--raised)] border border-[var(--line)] font-mono text-[10.5px] tnum outline-none focus:border-[var(--cyan)]"
+                    title="Tùy chỉnh TK hạch toán trước khi duyệt (VD: 6427, 211)"
+                  />
+                  <span className={liveJournalPreview.check.balanced ? "text-[var(--green)] tnum" : "text-[var(--amber)] tnum"}>
+                    ∑ {formatMoney(liveJournalPreview.check.totalAmountVnd, workspace.baseCurrency)}
+                  </span>
+                </div>
               </div>
               {liveJournalPreview.lines.map((ln, idx) => (
                 <div key={idx} className="flex items-center justify-between gap-2 text-[11px] py-0.5 text-[var(--text)]">

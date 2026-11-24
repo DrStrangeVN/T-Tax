@@ -187,6 +187,8 @@ export const transactions = sqliteTable(
   },
   (t) => [
     index("tx_ws_issued_idx").on(t.workspaceId, t.issuedAt),
+    index("tx_ws_dir_issued_idx").on(t.workspaceId, t.direction, t.issuedAt),
+    index("tx_ws_compliance_idx").on(t.workspaceId, t.complianceStatus),
     index("tx_ws_cat_idx").on(t.workspaceId, t.categoryCode),
     index("tx_ws_proj_idx").on(t.workspaceId, t.projectCode),
     index("tx_ws_mst_idx").on(t.workspaceId, t.merchantTaxCode)
@@ -336,7 +338,26 @@ export const journalLines = sqliteTable(
     taxCode: text("tax_code"),
     partnerTaxCode: text("partner_tax_code")
   },
-  (t) => [index("jl_entry_idx").on(t.entryId)]
+  (t) => [
+    index("jl_entry_idx").on(t.entryId),
+    index("jl_debit_idx").on(t.debitAccount),
+    index("jl_credit_idx").on(t.creditAccount)
+  ]
+)
+
+export const accountOpeningBalances = sqliteTable(
+  "account_opening_balances",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountCode: text("account_code").notNull(),
+    openingDebit: integer("opening_debit").notNull().default(0),
+    openingCredit: integer("opening_credit").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
+  },
+  (t) => [uniqueIndex("aob_ws_acc_uq").on(t.workspaceId, t.accountCode)]
 )
 
 export const bankStatements = sqliteTable(
@@ -359,7 +380,32 @@ export const bankStatements = sqliteTable(
     matchStatus: text("match_status").notNull().default("unmatched"),
     createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
   },
-  (t) => [index("bs_ws_date_idx").on(t.workspaceId, t.txDate)]
+  (t) => [
+    index("bs_ws_date_idx").on(t.workspaceId, t.txDate),
+    index("bs_ws_status_idx").on(t.workspaceId, t.matchStatus)
+  ]
+)
+
+export const bankStatementMatches = sqliteTable(
+  "bank_statement_matches",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    statementId: text("statement_id")
+      .notNull()
+      .references(() => bankStatements.id, { onDelete: "cascade" }),
+    transactionId: text("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    allocatedAmountVnd: integer("allocated_amount_vnd").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
+  },
+  (t) => [
+    index("bsm_stmt_idx").on(t.statementId),
+    index("bsm_tx_idx").on(t.transactionId)
+  ]
 )
 
 export const appData = sqliteTable(

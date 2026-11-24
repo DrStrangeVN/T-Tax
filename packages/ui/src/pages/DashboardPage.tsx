@@ -21,6 +21,9 @@ interface DashboardProps {
   workspace: WorkspaceDTO
   onNavigate: (page: NavPage) => void
   onOpenTransaction?: (txId: string) => void
+  onDrillPeriod?: (dateFrom: string, dateTo: string) => void
+  onDrillCategory?: (categoryCode: string) => void
+  onOpenVatReport?: () => void
   onRefreshCounts: () => void
   onToast: (msg: string, tone?: "ok" | "warn" | "err") => void
 }
@@ -39,6 +42,9 @@ interface DashboardStats {
   totalRevenue: number
   totalExpense: number
   netProfit: number
+  revenuePreTax?: number
+  expensePreTax?: number
+  operatingProfit?: number
   outputVat: number
   inputVat: number
   vatPayable: number
@@ -83,7 +89,16 @@ function getNextVatDeadline(taxPeriod: string): { label: string; dueText: string
   }
 }
 
-export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefreshCounts, onToast }: DashboardProps) {
+export function DashboardPage({
+  workspace,
+  onNavigate,
+  onOpenTransaction,
+  onDrillPeriod,
+  onDrillCategory,
+  onOpenVatReport,
+  onRefreshCounts,
+  onToast
+}: DashboardProps) {
   const transport = useTransport()
   const [period, setPeriod] = useState<"month" | "quarter" | "year" | "all">("year")
   const [stats, setStats] = useState<DashboardStats | null>(null)
@@ -117,6 +132,13 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
         if (active) setStats(d as unknown as DashboardStats)
       })
       .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [workspace.id, period, transport])
+
+  useEffect(() => {
+    let active = true
     transport
       .listLegalRules()
       .then((r) => {
@@ -132,7 +154,7 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
     return () => {
       active = false
     }
-  }, [workspace.id, period, transport])
+  }, [workspace.id, transport])
 
   const handleQuickDrop = async (fileList: FileList | null) => {
     if (!fileList?.length) return
@@ -180,27 +202,27 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
       <div className="sgrid sgrid-4">
         <div className="sgrid-cell">
           <div className="flex items-center justify-between text-[11px] font-medium text-[var(--muted)]">
-            <span>Doanh thu bán ra</span>
+            <span>Doanh thu trước thuế</span>
             <ArrowUpRight size={14} strokeWidth={1.8} className="text-[var(--green)]" />
           </div>
           <div className="mt-2 text-[22px] font-bold tracking-tight text-[var(--text)] tnum">
-            {formatMoney(s.totalRevenue, workspace.baseCurrency)}
+            {formatMoney(s.revenuePreTax ?? s.totalRevenue, workspace.baseCurrency)}
           </div>
           <div className="mt-1 text-[11px] text-[var(--dim)] tnum">
-            VAT đầu ra: {formatMoney(s.outputVat, workspace.baseCurrency)}
+            VAT ra: {formatMoney(s.outputVat, workspace.baseCurrency)} · Tổng: {formatShortVnd(s.totalRevenue)}
           </div>
         </div>
 
         <div className="sgrid-cell">
           <div className="flex items-center justify-between text-[11px] font-medium text-[var(--muted)]">
-            <span>Chi phí & Mua vào</span>
+            <span>Chi phí trước thuế</span>
             <ArrowDownLeft size={14} strokeWidth={1.8} className="text-[var(--rose)]" />
           </div>
           <div className="mt-2 text-[22px] font-bold tracking-tight text-[var(--text)] tnum">
-            {formatMoney(s.totalExpense, workspace.baseCurrency)}
+            {formatMoney(s.expensePreTax ?? s.totalExpense, workspace.baseCurrency)}
           </div>
           <div className="mt-1 text-[11px] text-[var(--dim)] tnum">
-            VAT khấu trừ: {formatMoney(s.inputVat, workspace.baseCurrency)}
+            VAT vào: {formatMoney(s.inputVat, workspace.baseCurrency)} · Tổng: {formatShortVnd(s.totalExpense)}
           </div>
         </div>
 
@@ -217,7 +239,7 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
             {formatMoney(Math.abs(s.vatPayable), workspace.baseCurrency)}
           </div>
           <div className="mt-1 text-[11px] text-[var(--dim)] tnum">
-            Lợi nhuận gộp: {formatShortVnd(s.netProfit)}
+            Lãi/Lỗ tạm tính (TT): {formatShortVnd(s.operatingProfit ?? s.netProfit)}
           </div>
         </div>
 
@@ -340,22 +362,30 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
                         {s.monthlySeries.map((pt) => {
                           const revPct = Math.round((pt.revenue / maxSeriesVal) * 100)
                           const expPct = Math.round((pt.expense / maxSeriesVal) * 100)
+                          const [yy, mm] = pt.period.split("-")
+                          const lastDay = yy && mm ? new Date(Number(yy), Number(mm), 0).getDate() : 31
                           return (
                             <div
                               key={pt.period}
                               onMouseEnter={() => setHoveredPeriod(pt.period)}
                               onMouseLeave={() => setHoveredPeriod(null)}
-                              className="h-full flex-1 max-w-[96px] flex items-end justify-center gap-1.5 z-10 cursor-pointer"
+                              onClick={() =>
+                                onDrillPeriod?.(
+                                  `${pt.period}-01`,
+                                  `${pt.period}-${String(lastDay).padStart(2, "0")}`
+                                )
+                              }
+                              className="h-full flex-1 max-w-[82px] flex items-end justify-center gap-1.5 z-10 cursor-pointer"
                             >
                               <div
                                 style={{ height: `${pt.revenue > 0 ? Math.max(3, revPct) : 0}%` }}
                                 title={`${pt.period} · Doanh thu: ${formatMoney(pt.revenue, workspace.baseCurrency)}`}
-                                className="w-full max-w-[40px] rounded-t-[4px] bg-[#34D399] transition-all hover:brightness-110"
+                                className="w-full max-w-[34px] rounded-t-[4px] bg-[#34D399] transition-all hover:brightness-110"
                               />
                               <div
                                 style={{ height: `${pt.expense > 0 ? Math.max(3, expPct) : 0}%` }}
                                 title={`${pt.period} · Chi phí: ${formatMoney(pt.expense, workspace.baseCurrency)}`}
-                                className="w-full max-w-[40px] rounded-t-[4px] bg-[#FB7185] transition-all hover:brightness-110"
+                                className="w-full max-w-[34px] rounded-t-[4px] bg-[#FB7185] transition-all hover:brightness-110"
                               />
                             </div>
                           )
@@ -403,8 +433,12 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
                 </button>
               </div>
 
-              {/* VAT Deadline Banner */}
-              <div className="p-2.5 rounded-[10px] border border-[var(--line)] bg-[var(--raised)] flex items-center justify-between gap-2">
+              {/* VAT Deadline Banner (clickable -> Bảng kê GTGT) */}
+              <button
+                type="button"
+                onClick={() => onOpenVatReport?.()}
+                className="w-full p-2.5 rounded-[10px] border border-[var(--line)] bg-[var(--raised)] hover:border-[var(--cyan)] flex items-center justify-between gap-2 text-left transition-colors"
+              >
                 <div className="flex items-center gap-2 min-w-0">
                   <CalendarClock
                     size={15}
@@ -419,7 +453,7 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
                 <span className={`tag tnum shrink-0 ${deadline.urgent ? "tag-warn" : "tag-info"}`}>
                   {deadline.daysLeft >= 0 ? `Còn ${deadline.daysLeft} ngày` : `Quá hạn ${Math.abs(deadline.daysLeft)}n`}
                 </span>
-              </div>
+              </button>
 
               {/* Unreviewed shortcut */}
               {s.unreviewedCount > 0 && (
@@ -501,7 +535,13 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
             ) : (
               <div className="space-y-2.5">
                 {s.categoryBreakdown.slice(0, 6).map((cat) => (
-                  <div key={cat.code} className="space-y-1">
+                  <button
+                    key={cat.code}
+                    type="button"
+                    onClick={() => onDrillCategory?.(cat.code)}
+                    className="w-full text-left space-y-1 hover:opacity-90 cursor-pointer"
+                    title="Click để lọc giao dịch theo danh mục này"
+                  >
                     <div className="flex items-center justify-between text-[12px]">
                       <span className="flex items-center gap-2 text-[var(--text)] font-medium">
                         <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
@@ -515,7 +555,7 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
                         style={{ width: `${Math.round((cat.total / maxCat) * 100)}%`, backgroundColor: cat.color }}
                       />
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}

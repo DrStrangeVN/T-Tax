@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto"
 import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm"
 import {
+  HKD_TAX_SECTORS,
   analyzeDocumentHybrid,
   applyColumnMapping,
   auditParsedEInvoice,
   convertAmount,
+  exportAccountLedgerExcelBuffer,
+  exportBatchXmlExcelBuffer,
   exportFastBravoExcelBuffer,
+  exportHkdBookExcelBuffer,
   exportHtkkExcelBuffer,
   exportMisaImportExcelBuffer,
   exportTransactionsCsvAndZip,
@@ -23,16 +27,20 @@ import {
   unpackIngestBuffers,
   verifyEInvoiceXmlSignature,
   verifyJournalBalance,
+  type AccountLedgerRow,
   type AccountingRegime,
   type AttachmentImageFormat,
   type AuditIssue,
   type BankDetails,
+  type BankMatchItem,
   type BatchAnalyzeProgressEvent,
   type DocumentAnalysisOutcome,
   type ExportInvoiceRow,
   type FxCacheAdapter,
+  type HkdTaxSectorCode,
   type LLMProviderConfig,
   type LineItemDTO,
+  type OpeningBalanceRow,
   type OutgoingInvoiceTemplateData,
   type ParsedEInvoice,
   type TransactionDirection,
@@ -73,6 +81,14 @@ function enrichWorkspaceRow<T extends { bankDetailsJson: string | null }>(row: T
 }
 
 export class TTaxService {
+  private readonly batchSessions = new Map<
+    string,
+    {
+      workspaceId: string
+      inputs: Array<{ filename: string; mimetype?: string; buffer: Buffer }>
+    }
+  >()
+
   constructor(
     public readonly db: TTaxDb,
     public readonly sqlite: Database.Database,
@@ -455,7 +471,55 @@ export class TTaxService {
     const cond = opts.unreviewedOnly
       ? and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.isReviewed, false))
       : eq(schema.files.workspaceId, workspaceId)
-    return this.db.select().from(schema.files).where(cond).orderBy(desc(schema.files.createdAt)).all()
+    const rows = this.db.select().from(schema.files).where(cond).orderBy(desc(schema.files.createdAt)).all()
+    if (opts.unreviewedOnly || rows.length === 0) {
+      return rows.map((f) => ({ ...f, linkedTransaction: null as { id: string; invoiceNumber: string | null; merchant: string | null; issuedAt: string | null } | null }))
+    }
+
+    const txRows = this.db
+      .select({
+        id: schema.transactions.id,
+        invoiceNumber: schema.transactions.invoiceNumber,
+        merchant: schema.transactions.merchant,
+        issuedAt: schema.transactions.issuedAt,
+        filesJson: schema.transactions.filesJson
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.workspaceId, workspaceId))
+      .all()
+
+    const linkByFileId = new Map<string, { id: string; invoiceNumber: string | null; merchant: string | null; issuedAt: string | null }>()
+    for (const t of txRows) {
+      try {
+        const ids = JSON.parse(t.filesJson || "[]") as string[]
+        for (const fid of ids) {
+          if (fid && !linkByFileId.has(fid)) {
+            linkByFileId.set(fid, { id: t.id, invoiceNumber: t.invoiceNumber, merchant: t.merchant, issuedAt: t.issuedAt })
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return rows.map((f) => ({
+      ...f,
+      linkedTransaction: linkByFileId.get(f.id) ?? null
+    }))
+  }
+
+  getVaultFilePath(workspaceId: string, fileId: string): { absPath: string; mimetype: string; filename: string } {
+    const file = this.db
+      .select()
+      .from(schema.files)
+      .where(and(eq(schema.files.id, fileId), eq(schema.files.workspaceId, workspaceId)))
+      .get()
+    if (!file) throw new Error("Không tìm thấy tệp chứng từ.")
+    return {
+      absPath: this.vault.resolvePath(file.relativePath),
+      mimetype: file.mimetype || "application/octet-stream",
+      filename: file.filename
+    }
   }
 
   readFilePreviewData(workspaceId: string, fileId: string): {
@@ -589,6 +653,7 @@ export class TTaxService {
       issuedAt?: string | null
       paymentMethod?: string | null
       paymentStatus?: "paid" | "unpaid" | "partial"
+      debitAccountOverride?: string | null
       note?: string | null
       items?: LineItemDTO[]
       extra?: Record<string, unknown>
@@ -782,6 +847,7 @@ export class TTaxService {
         categoryCode: input.categoryCode,
         paymentMethod: input.paymentMethod,
         paymentStatus: input.paymentStatus,
+        debitAccountOverride: input.debitAccountOverride,
         preTaxAmount: convertedPreTaxVnd,
         vatAmount: convertedVatVnd,
         totalAmount: convertedTotalVnd,
@@ -816,10 +882,21 @@ export class TTaxService {
     })()
 
     this.db.transaction((tx) => {
+      const affectedMatches = tx
+        .select({ statementId: schema.bankStatementMatches.statementId })
+        .from(schema.bankStatementMatches)
+        .where(and(eq(schema.bankStatementMatches.workspaceId, workspaceId), eq(schema.bankStatementMatches.transactionId, txId)))
+        .all()
+      tx.delete(schema.bankStatementMatches)
+        .where(and(eq(schema.bankStatementMatches.workspaceId, workspaceId), eq(schema.bankStatementMatches.transactionId, txId)))
+        .run()
       tx.update(schema.bankStatements)
         .set({ matchedTransactionId: null, matchStatus: "unmatched", matchConfidence: null })
         .where(and(eq(schema.bankStatements.workspaceId, workspaceId), eq(schema.bankStatements.matchedTransactionId, txId)))
         .run()
+      for (const m of affectedMatches) {
+        this.syncBankStatementSummaryInTx(tx, workspaceId, m.statementId)
+      }
       tx.delete(schema.einvoiceRecords)
         .where(and(eq(schema.einvoiceRecords.workspaceId, workspaceId), eq(schema.einvoiceRecords.transactionId, txId)))
         .run()
@@ -845,6 +922,7 @@ export class TTaxService {
       categoryCode?: string | null
       paymentMethod?: string | null
       paymentStatus?: string | null
+      debitAccountOverride?: string | null
       preTaxAmount: number
       vatAmount: number
       totalAmount: number
@@ -872,7 +950,7 @@ export class TTaxService {
       direction: p.direction,
       categoryCode: p.categoryCode,
       categoryDefaultDebit: cat?.defaultDebitAccount,
-      counterpartyDefaultAccount: cp?.defaultAccountCode,
+      counterpartyDefaultAccount: p.debitAccountOverride?.trim() || cp?.defaultAccountCode,
       paymentMethod: p.paymentMethod,
       paymentStatus: p.paymentStatus,
       preTaxAmount: Math.round(p.preTaxAmount || 0),
@@ -1048,27 +1126,104 @@ export class TTaxService {
     return created
   }
 
-  deleteFile(workspaceId: string, fileId: string) {
+  deleteFile(workspaceId: string, fileId: string, opts: { force?: boolean } = {}) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
     const file = this.db
       .select()
       .from(schema.files)
       .where(and(eq(schema.files.id, fileId), eq(schema.files.workspaceId, workspaceId)))
       .get()
     if (!file) return false
-    if (file.pairedFileId) {
-      this.db
-        .update(schema.files)
-        .set({ pairedFileId: null })
-        .where(and(eq(schema.files.id, file.pairedFileId), eq(schema.files.workspaceId, workspaceId)))
-        .run()
+
+    const allTx = this.db
+      .select({
+        id: schema.transactions.id,
+        invoiceNumber: schema.transactions.invoiceNumber,
+        merchant: schema.transactions.merchant,
+        issuedAt: schema.transactions.issuedAt,
+        filesJson: schema.transactions.filesJson
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.workspaceId, workspaceId))
+      .all()
+
+    const linkedTxs = allTx.filter((t) => {
+      try {
+        return (JSON.parse(t.filesJson || "[]") as string[]).includes(fileId)
+      } catch {
+        return false
+      }
+    })
+
+    for (const t of linkedTxs) {
+      if (ws?.lockDate && t.issuedAt && t.issuedAt <= ws.lockDate) {
+        throw new Error(
+          `Không thể xóa chứng từ đang gắn với giao dịch ${t.invoiceNumber || t.merchant || t.id} thuộc kỳ đã khóa sổ (${ws.lockDate}).`
+        )
+      }
     }
+
+    if (linkedTxs.length > 0 && !opts.force) {
+      const label = linkedTxs.map((t) => t.invoiceNumber || t.merchant || t.id).join(", ")
+      throw new Error(`Chứng từ đang gắn với giao dịch (${label}). Xác nhận xóa ép để gỡ liên kết khỏi sổ.`)
+    }
+
+    this.db.transaction((tx) => {
+      for (const t of linkedTxs) {
+        const nextIds = (JSON.parse(t.filesJson || "[]") as string[]).filter((id) => id !== fileId)
+        tx.update(schema.transactions)
+          .set({ filesJson: JSON.stringify(nextIds), updatedAt: new Date().toISOString() })
+          .where(eq(schema.transactions.id, t.id))
+          .run()
+      }
+      if (file.pairedFileId) {
+        tx.update(schema.files)
+          .set({ pairedFileId: null })
+          .where(and(eq(schema.files.id, file.pairedFileId), eq(schema.files.workspaceId, workspaceId)))
+          .run()
+      }
+      tx.delete(schema.files).where(eq(schema.files.id, fileId)).run()
+    })
+
     this.vault.deleteFile(file.relativePath)
-    this.db.delete(schema.files).where(eq(schema.files.id, fileId)).run()
     return true
   }
 
   renderParsedXmlHtml(parsed: ParsedEInvoice, signature?: XmlSignatureVerification) {
     return renderEInvoiceHtml(parsed, signature)
+  }
+
+  async batchProcessXmlSession(
+    workspaceId: string,
+    inputs: Array<{ filename: string; mimetype?: string; buffer: Buffer }>
+  ) {
+    const items = await this.batchProcessXmlFiles(workspaceId, inputs, false)
+    const batchId = randomUUID()
+    if (this.batchSessions.size >= 5) {
+      const oldestKey = this.batchSessions.keys().next().value
+      if (oldestKey) this.batchSessions.delete(oldestKey)
+    }
+    this.batchSessions.set(batchId, { workspaceId, inputs })
+    return { batchId, items }
+  }
+
+  async commitBatchXmlSession(workspaceId: string, batchId: string, selectedIndices?: number[]) {
+    const session = this.batchSessions.get(batchId)
+    if (!session || session.workspaceId !== workspaceId) {
+      throw new Error("Phiên quét XML đã hết hạn, vui lòng chọn lại tệp XML.")
+    }
+    if (!selectedIndices) {
+      const items = await this.batchProcessXmlFiles(workspaceId, session.inputs, true)
+      return { batchId, items }
+    }
+    const unpacked = await unpackIngestBuffers(session.inputs)
+    const xmlItems = unpacked.filter((item) => item.filename.toLowerCase().endsWith(".xml"))
+    const chosenSet = new Set(selectedIndices)
+    const chosenBuffers = xmlItems
+      .filter((_, idx) => chosenSet.has(idx))
+      .map((item) => ({ filename: item.filename, mimetype: "application/xml", buffer: item.buffer }))
+    const items = await this.batchProcessXmlFiles(workspaceId, chosenBuffers, true)
+    return { batchId, items }
   }
 
   async batchProcessXmlFiles(
@@ -1612,11 +1767,22 @@ export class TTaxService {
         this.assertNotLocked(ws?.lockDate, r.issuedAt)
       }
 
-      // Reset linked bank statements back to unmatched instead of leaving orphaned status='matched'
+      // Reset linked bank statements back to unmatched (or partial if other multi-matches remain)
+      const affectedMatches = tx
+        .select({ statementId: schema.bankStatementMatches.statementId })
+        .from(schema.bankStatementMatches)
+        .where(and(eq(schema.bankStatementMatches.workspaceId, workspaceId), inArray(schema.bankStatementMatches.transactionId, ids)))
+        .all()
+      tx.delete(schema.bankStatementMatches)
+        .where(and(eq(schema.bankStatementMatches.workspaceId, workspaceId), inArray(schema.bankStatementMatches.transactionId, ids)))
+        .run()
       tx.update(schema.bankStatements)
         .set({ matchedTransactionId: null, matchStatus: "unmatched", matchConfidence: null })
         .where(and(eq(schema.bankStatements.workspaceId, workspaceId), inArray(schema.bankStatements.matchedTransactionId, ids)))
         .run()
+      for (const m of affectedMatches) {
+        this.syncBankStatementSummaryInTx(tx, workspaceId, m.statementId)
+      }
 
       // Clear einvoice_records so deleted XML invoices can be cleanly re-ingested/re-approved without false duplicate block
       tx.delete(schema.einvoiceRecords)
@@ -1668,6 +1834,8 @@ export class TTaxService {
           COUNT(*) AS tx_count,
           COALESCE(SUM(CASE WHEN direction = 'output' THEN COALESCE(converted_total_vnd, total_amount) ELSE 0 END), 0) AS total_rev,
           COALESCE(SUM(CASE WHEN direction != 'output' THEN COALESCE(converted_total_vnd, total_amount) ELSE 0 END), 0) AS total_exp,
+          COALESCE(SUM(CASE WHEN direction = 'output' THEN ROUND(pre_tax_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS rev_pre_tax,
+          COALESCE(SUM(CASE WHEN direction != 'output' THEN ROUND(pre_tax_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS exp_pre_tax,
           COALESCE(SUM(CASE WHEN direction = 'output' THEN ROUND(vat_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS out_vat,
           COALESCE(SUM(CASE WHEN direction != 'output' THEN ROUND(vat_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS in_vat,
           COALESCE(SUM(CASE WHEN compliance_status IN ('warning', 'error') THEN 1 ELSE 0 END), 0) AS warnings
@@ -1677,6 +1845,8 @@ export class TTaxService {
         tx_count: number
         total_rev: number
         total_exp: number
+        rev_pre_tax: number
+        exp_pre_tax: number
         out_vat: number
         in_vat: number
         warnings: number
@@ -1736,6 +1906,8 @@ export class TTaxService {
 
     const totalRevenue = agg?.total_rev ?? 0
     const totalExpense = agg?.total_exp ?? 0
+    const revenuePreTax = agg?.rev_pre_tax ?? 0
+    const expensePreTax = agg?.exp_pre_tax ?? 0
     const outputVat = agg?.out_vat ?? 0
     const inputVat = agg?.in_vat ?? 0
 
@@ -1743,6 +1915,9 @@ export class TTaxService {
       totalRevenue,
       totalExpense,
       netProfit: totalRevenue - totalExpense,
+      revenuePreTax,
+      expensePreTax,
+      operatingProfit: revenuePreTax - expensePreTax,
       outputVat,
       inputVat,
       vatPayable: outputVat - inputVat,
@@ -1897,6 +2072,51 @@ export class TTaxService {
     return { posted: true, amountVnd: deductible, entryId: res.id, voucherNo: res.voucherNo }
   }
 
+  listOpeningBalances(workspaceId: string): OpeningBalanceRow[] {
+    return this.db
+      .select({
+        accountCode: schema.accountOpeningBalances.accountCode,
+        openingDebit: schema.accountOpeningBalances.openingDebit,
+        openingCredit: schema.accountOpeningBalances.openingCredit
+      })
+      .from(schema.accountOpeningBalances)
+      .where(eq(schema.accountOpeningBalances.workspaceId, workspaceId))
+      .orderBy(asc(schema.accountOpeningBalances.accountCode))
+      .all()
+  }
+
+  saveOpeningBalances(workspaceId: string, rows: OpeningBalanceRow[]) {
+    const normalized = rows
+      .map((r) => ({
+        accountCode: String(r.accountCode || "").trim(),
+        openingDebit: Math.max(0, Math.round(Number(r.openingDebit) || 0)),
+        openingCredit: Math.max(0, Math.round(Number(r.openingCredit) || 0))
+      }))
+      .filter((r) => r.accountCode && (r.openingDebit > 0 || r.openingCredit > 0))
+
+    const sumDr = normalized.reduce((s, r) => s + r.openingDebit, 0)
+    const sumCr = normalized.reduce((s, r) => s + r.openingCredit, 0)
+    if (sumDr !== sumCr) {
+      throw new Error(`Số dư đầu kỳ chưa cân đối (Tổng Nợ ${sumDr.toLocaleString("vi-VN")} ≠ Tổng Có ${sumCr.toLocaleString("vi-VN")}).`)
+    }
+
+    this.db.transaction((tx) => {
+      tx.delete(schema.accountOpeningBalances).where(eq(schema.accountOpeningBalances.workspaceId, workspaceId)).run()
+      for (const r of normalized) {
+        tx.insert(schema.accountOpeningBalances)
+          .values({
+            id: randomUUID(),
+            workspaceId,
+            accountCode: r.accountCode,
+            openingDebit: r.openingDebit,
+            openingCredit: r.openingCredit
+          })
+          .run()
+      }
+    })
+    return this.listOpeningBalances(workspaceId)
+  }
+
   getTrialBalance(workspaceId: string, opts: { dateFrom?: string; dateTo?: string } = {}) {
     const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
     if (!ws) return []
@@ -1935,6 +2155,13 @@ export class TTaxService {
         accMap.set(code, row)
       }
       return row
+    }
+
+    // Seed explicit workspace Opening Balances first
+    for (const ob of this.listOpeningBalances(workspaceId)) {
+      const target = getOrCreate(ob.accountCode)
+      target.openingDebit += ob.openingDebit
+      target.openingCredit += ob.openingCredit
     }
 
     const rows = this.sqlite
@@ -1976,6 +2203,82 @@ export class TTaxService {
       }
     }
     return out.sort((a, b) => a.code.localeCompare(b.code))
+  }
+
+  getAccountLedger(workspaceId: string, accountCode: string, opts: { dateFrom?: string; dateTo?: string } = {}) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) return { accountCode, accountName: `Tài khoản ${accountCode}`, openingBalance: 0, rows: [] as AccountLedgerRow[], totalDebit: 0, totalCredit: 0, closingBalance: 0 }
+    const acc = this.listAccounts(workspaceId, ws.accountingRegime as AccountingRegime).find((a) => a.code === accountCode)
+    const accountName = acc?.name ?? `Tài khoản ${accountCode}`
+
+    let openingBalance = 0
+    for (const ob of this.listOpeningBalances(workspaceId)) {
+      if (ob.accountCode === accountCode) {
+        openingBalance += ob.openingDebit - ob.openingCredit
+      }
+    }
+
+    const rawLines = this.sqlite
+      .prepare(
+        `SELECT je.id AS entryId, je.voucher_no AS voucherNo, je.voucher_date AS voucherDate,
+                COALESCE(NULLIF(jl.description, ''), je.description) AS description,
+                je.transaction_id AS transactionId,
+                jl.debit_account AS debitAccount, jl.credit_account AS creditAccount, jl.amount_vnd AS amountVnd
+         FROM journal_lines jl
+         JOIN journal_entries je ON jl.entry_id = je.id
+         WHERE je.workspace_id = ? AND (jl.debit_account = ? OR jl.credit_account = ?)
+         ORDER BY je.voucher_date ASC, je.voucher_no ASC`
+      )
+      .all(workspaceId, accountCode, accountCode) as Array<{
+        entryId: string
+        voucherNo: string
+        voucherDate: string
+        description: string
+        transactionId: string | null
+        debitAccount: string
+        creditAccount: string
+        amountVnd: number
+      }>
+
+    const ledgerRows: AccountLedgerRow[] = []
+    let running = openingBalance
+    let totalDebit = 0
+    let totalCredit = 0
+
+    for (const ln of rawLines) {
+      if (opts.dateTo && ln.voucherDate > opts.dateTo) continue
+      const drAmt = ln.debitAccount === accountCode ? Number(ln.amountVnd ?? 0) : 0
+      const crAmt = ln.creditAccount === accountCode ? Number(ln.amountVnd ?? 0) : 0
+      if (opts.dateFrom && ln.voucherDate < opts.dateFrom) {
+        openingBalance += drAmt - crAmt
+        running = openingBalance
+        continue
+      }
+      running += drAmt - crAmt
+      totalDebit += drAmt
+      totalCredit += crAmt
+      ledgerRows.push({
+        entryId: ln.entryId,
+        voucherNo: ln.voucherNo,
+        voucherDate: ln.voucherDate,
+        description: ln.description,
+        counterAccount: ln.debitAccount === accountCode ? ln.creditAccount : ln.debitAccount,
+        debitAmount: drAmt,
+        creditAmount: crAmt,
+        runningBalance: running,
+        transactionId: ln.transactionId
+      })
+    }
+
+    return {
+      accountCode,
+      accountName,
+      openingBalance,
+      rows: ledgerRows,
+      totalDebit,
+      totalCredit,
+      closingBalance: openingBalance + totalDebit - totalCredit
+    }
   }
 
   listCounterparties(workspaceId: string) {
@@ -2129,7 +2432,17 @@ export class TTaxService {
       .orderBy(desc(schema.bankStatements.txDate))
       .all()
 
-    const matchedIds = [...new Set(stmts.map((s) => s.matchedTransactionId).filter((x): x is string => Boolean(x)))]
+    const matchRows = this.db
+      .select()
+      .from(schema.bankStatementMatches)
+      .where(eq(schema.bankStatementMatches.workspaceId, workspaceId))
+      .all()
+
+    const txIdSet = new Set<string>()
+    for (const s of stmts) if (s.matchedTransactionId) txIdSet.add(s.matchedTransactionId)
+    for (const m of matchRows) txIdSet.add(m.transactionId)
+
+    const matchedIds = [...txIdSet]
     const matchedMap = new Map<
       string,
       { id: string; merchant: string | null; invoiceNumber: string | null; issuedAt: string | null; totalAmount: number }
@@ -2142,45 +2455,168 @@ export class TTaxService {
           merchant: schema.transactions.merchant,
           invoiceNumber: schema.transactions.invoiceNumber,
           issuedAt: schema.transactions.issuedAt,
-          totalAmount: schema.transactions.totalAmount
+          totalAmount: schema.transactions.totalAmount,
+          convertedTotalVnd: schema.transactions.convertedTotalVnd
         })
         .from(schema.transactions)
         .where(inArray(schema.transactions.id, chunk))
         .all()
-      for (const t of txs) matchedMap.set(t.id, t)
+      for (const t of txs) {
+        matchedMap.set(t.id, {
+          id: t.id,
+          merchant: t.merchant,
+          invoiceNumber: t.invoiceNumber,
+          issuedAt: t.issuedAt,
+          totalAmount: t.convertedTotalVnd ?? t.totalAmount
+        })
+      }
     }
 
-    return stmts.map((s) => ({
-      ...s,
-      matchedTransaction: s.matchedTransactionId ? matchedMap.get(s.matchedTransactionId) ?? null : null
-    }))
+    const matchesByStmt = new Map<string, BankMatchItem[]>()
+    for (const m of matchRows) {
+      const info = matchedMap.get(m.transactionId)
+      const item: BankMatchItem = {
+        transactionId: m.transactionId,
+        allocatedAmountVnd: m.allocatedAmountVnd,
+        merchant: info?.merchant ?? null,
+        invoiceNumber: info?.invoiceNumber ?? null,
+        issuedAt: info?.issuedAt ?? null,
+        totalAmount: info?.totalAmount ?? m.allocatedAmountVnd
+      }
+      const list = matchesByStmt.get(m.statementId) ?? []
+      list.push(item)
+      matchesByStmt.set(m.statementId, list)
+    }
+
+    return stmts.map((s) => {
+      const multi = matchesByStmt.get(s.id) ?? []
+      // Backfill legacy single matchedTransactionId when matchStatus === 'matched' and join table empty
+      if (multi.length === 0 && s.matchStatus === "matched" && s.matchedTransactionId) {
+        const info = matchedMap.get(s.matchedTransactionId)
+        if (info) {
+          multi.push({
+            transactionId: info.id,
+            allocatedAmountVnd: info.totalAmount,
+            merchant: info.merchant,
+            invoiceNumber: info.invoiceNumber,
+            issuedAt: info.issuedAt,
+            totalAmount: info.totalAmount
+          })
+        }
+      }
+      const matchedTotalVnd = multi.reduce((sum, x) => sum + (Number(x.allocatedAmountVnd) || 0), 0)
+      const primaryTxId = multi[0]?.transactionId ?? s.matchedTransactionId
+      return {
+        ...s,
+        matchedTransactionId: primaryTxId,
+        matchedTransaction: primaryTxId ? matchedMap.get(primaryTxId) ?? null : null,
+        matches: multi,
+        matchedTotalVnd
+      }
+    })
+  }
+
+  private syncBankStatementSummaryInTx(
+    tx: Parameters<Parameters<TTaxDb["transaction"]>[0]>[0],
+    workspaceId: string,
+    statementId: string
+  ) {
+    const remaining = tx
+      .select()
+      .from(schema.bankStatementMatches)
+      .where(and(eq(schema.bankStatementMatches.workspaceId, workspaceId), eq(schema.bankStatementMatches.statementId, statementId)))
+      .all()
+    if (remaining.length === 0) {
+      tx.update(schema.bankStatements)
+        .set({ matchedTransactionId: null, matchStatus: "unmatched", matchConfidence: null })
+        .where(and(eq(schema.bankStatements.id, statementId), eq(schema.bankStatements.workspaceId, workspaceId)))
+        .run()
+    } else {
+      tx.update(schema.bankStatements)
+        .set({ matchedTransactionId: remaining[0]!.transactionId, matchStatus: "matched", matchConfidence: 1 })
+        .where(and(eq(schema.bankStatements.id, statementId), eq(schema.bankStatements.workspaceId, workspaceId)))
+        .run()
+    }
+  }
+
+  addBankMatch(workspaceId: string, statementId: string, transactionId: string, allocatedAmountVnd?: number) {
+    const txRow = this.db
+      .select({ id: schema.transactions.id, totalAmount: schema.transactions.totalAmount, convertedTotalVnd: schema.transactions.convertedTotalVnd })
+      .from(schema.transactions)
+      .where(and(eq(schema.transactions.id, transactionId), eq(schema.transactions.workspaceId, workspaceId)))
+      .get()
+    if (!txRow) throw new Error("Không tìm thấy giao dịch để đối chiếu.")
+    const alloc = Math.max(0, Math.round(allocatedAmountVnd ?? (txRow.convertedTotalVnd ?? txRow.totalAmount)))
+
+    this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(schema.bankStatementMatches)
+        .where(
+          and(
+            eq(schema.bankStatementMatches.workspaceId, workspaceId),
+            eq(schema.bankStatementMatches.statementId, statementId),
+            eq(schema.bankStatementMatches.transactionId, transactionId)
+          )
+        )
+        .get()
+      if (!existing) {
+        tx.insert(schema.bankStatementMatches)
+          .values({
+            id: randomUUID(),
+            workspaceId,
+            statementId,
+            transactionId,
+            allocatedAmountVnd: alloc
+          })
+          .run()
+      } else {
+        tx.update(schema.bankStatementMatches)
+          .set({ allocatedAmountVnd: alloc })
+          .where(eq(schema.bankStatementMatches.id, existing.id))
+          .run()
+      }
+      this.syncBankStatementSummaryInTx(tx, workspaceId, statementId)
+      tx.update(schema.transactions)
+        .set({ paymentStatus: "paid", updatedAt: new Date().toISOString() })
+        .where(and(eq(schema.transactions.id, transactionId), eq(schema.transactions.workspaceId, workspaceId)))
+        .run()
+    })
+  }
+
+  removeBankMatch(workspaceId: string, statementId: string, transactionId?: string) {
+    this.db.transaction((tx) => {
+      if (transactionId) {
+        tx.delete(schema.bankStatementMatches)
+          .where(
+            and(
+              eq(schema.bankStatementMatches.workspaceId, workspaceId),
+              eq(schema.bankStatementMatches.statementId, statementId),
+              eq(schema.bankStatementMatches.transactionId, transactionId)
+            )
+          )
+          .run()
+      } else {
+        tx.delete(schema.bankStatementMatches)
+          .where(and(eq(schema.bankStatementMatches.workspaceId, workspaceId), eq(schema.bankStatementMatches.statementId, statementId)))
+          .run()
+      }
+      this.syncBankStatementSummaryInTx(tx, workspaceId, statementId)
+    })
   }
 
   confirmBankMatch(workspaceId: string, statementId: string, transactionId: string) {
-    this.db
-      .update(schema.bankStatements)
-      .set({ matchedTransactionId: transactionId, matchStatus: "matched", matchConfidence: 1 })
-      .where(and(eq(schema.bankStatements.id, statementId), eq(schema.bankStatements.workspaceId, workspaceId)))
-      .run()
-    this.db
-      .update(schema.transactions)
-      .set({ paymentStatus: "paid", updatedAt: new Date().toISOString() })
-      .where(and(eq(schema.transactions.id, transactionId), eq(schema.transactions.workspaceId, workspaceId)))
-      .run()
+    this.addBankMatch(workspaceId, statementId, transactionId)
   }
 
   unmatchBankStatement(workspaceId: string, statementId: string) {
-    this.db
-      .update(schema.bankStatements)
-      .set({ matchedTransactionId: null, matchStatus: "unmatched", matchConfidence: null })
-      .where(and(eq(schema.bankStatements.id, statementId), eq(schema.bankStatements.workspaceId, workspaceId)))
-      .run()
+    this.removeBankMatch(workspaceId, statementId)
   }
 
   async quickPostBankStatement(
     workspaceId: string,
     statementId: string,
-    input: { kind: "bank_fee" | "interest" | "custom"; name?: string; categoryCode?: string }
+    input: { kind: "bank_fee" | "interest" | "cash_transfer" | "custom"; name?: string; categoryCode?: string; counterAccountCode?: string }
   ) {
     const stmt = this.db
       .select()
@@ -2197,7 +2633,11 @@ export class TTaxService {
         ? `Phí dịch vụ ngân hàng ${stmt.bankCode}`
         : input.kind === "interest"
           ? `Lãi tiền gửi ngân hàng ${stmt.bankCode}`
-          : stmt.description.slice(0, 80))
+          : input.kind === "cash_transfer"
+            ? isDebit
+              ? `Rút tiền gửi nhập quỹ tiền mặt (${stmt.bankCode})`
+              : `Nộp tiền mặt vào TK ngân hàng (${stmt.bankCode})`
+            : stmt.description.slice(0, 80))
     const categoryCode =
       input.categoryCode || (input.kind === "bank_fee" ? "fees" : input.kind === "interest" ? "other" : "other")
 
@@ -2215,22 +2655,33 @@ export class TTaxService {
       note: stmt.description
     })
 
-    // For interest income, re-map credit revenue to 515 (Doanh thu tài chính) under enterprise regimes
-    if (input.kind === "interest") {
-      const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
-      if (ws && ws.accountingRegime !== "HKD_2026") {
-        const entry = this.db
-          .select()
-          .from(schema.journalEntries)
-          .where(and(eq(schema.journalEntries.workspaceId, workspaceId), eq(schema.journalEntries.transactionId, tx.id)))
-          .get()
-        if (entry) {
-          this.db.update(schema.journalLines).set({ creditAccount: "515" }).where(eq(schema.journalLines.entryId, entry.id)).run()
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    const entry = this.db
+      .select()
+      .from(schema.journalEntries)
+      .where(and(eq(schema.journalEntries.workspaceId, workspaceId), eq(schema.journalEntries.transactionId, tx.id)))
+      .get()
+
+    if (entry && ws && ws.accountingRegime !== "HKD_2026") {
+      if (input.kind === "interest") {
+        this.db.update(schema.journalLines).set({ creditAccount: "515" }).where(eq(schema.journalLines.entryId, entry.id)).run()
+      } else if (input.kind === "cash_transfer") {
+        if (isDebit) {
+          this.db.update(schema.journalLines).set({ debitAccount: "1111", creditAccount: "1121" }).where(eq(schema.journalLines.entryId, entry.id)).run()
+        } else {
+          this.db.update(schema.journalLines).set({ debitAccount: "1121", creditAccount: "1111" }).where(eq(schema.journalLines.entryId, entry.id)).run()
+        }
+      } else if (input.kind === "custom" && input.counterAccountCode?.trim()) {
+        const counter = input.counterAccountCode.trim()
+        if (isDebit) {
+          this.db.update(schema.journalLines).set({ debitAccount: counter, creditAccount: "1121" }).where(eq(schema.journalLines.entryId, entry.id)).run()
+        } else {
+          this.db.update(schema.journalLines).set({ debitAccount: "1121", creditAccount: counter }).where(eq(schema.journalLines.entryId, entry.id)).run()
         }
       }
     }
 
-    this.confirmBankMatch(workspaceId, statementId, tx.id)
+    this.addBankMatch(workspaceId, statementId, tx.id, amt)
     return tx
   }
 
@@ -2421,6 +2872,49 @@ export class TTaxService {
           includeAttachments: kind === "zip"
         })
       }
+    }
+  }
+
+  async exportAccountLedgerExcel(workspaceId: string, accountCode: string, opts: { dateFrom?: string; dateTo?: string } = {}) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) throw new Error("Workspace không tồn tại.")
+    const ledger = this.getAccountLedger(workspaceId, accountCode, opts)
+    return {
+      filename: `so_chi_tiet_tk_${accountCode}.xlsx`,
+      buffer: await exportAccountLedgerExcelBuffer({
+        workspaceName: ws.name,
+        workspaceTaxCode: ws.taxCode,
+        accountCode: ledger.accountCode,
+        accountName: ledger.accountName,
+        openingBalance: ledger.openingBalance,
+        closingBalance: ledger.closingBalance,
+        rows: ledger.rows
+      })
+    }
+  }
+
+  async exportHkdBookExcel(workspaceId: string, sectorCode: HkdTaxSectorCode, filters: TransactionFilterParams = {}) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) throw new Error("Workspace không tồn tại.")
+    const sec = HKD_TAX_SECTORS.find((s) => s.code === sectorCode) ?? HKD_TAX_SECTORS[0]!
+    const rows = this.buildExportRows(workspaceId, filters)
+    return {
+      filename: `so_hkd_s1_s2_${sectorCode}.xlsx`,
+      buffer: await exportHkdBookExcelBuffer({
+        workspaceName: ws.name,
+        workspaceTaxCode: ws.taxCode,
+        sectorLabel: sec.label,
+        rows
+      })
+    }
+  }
+
+  async exportBatchXmlExcel(
+    items: Array<{ filename: string; status: string; parsed?: ParsedEInvoice; signature?: XmlSignatureVerification; issueSummary?: string }>
+  ) {
+    return {
+      filename: `ket_qua_quet_xml_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      buffer: await exportBatchXmlExcelBuffer({ items })
     }
   }
 

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, Menu, type MenuItemConstructorOptions } from "electron"
+import { app, BrowserWindow, Menu, protocol, type MenuItemConstructorOptions } from "electron"
+import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { openTTaxDatabase, TTaxService, VaultStorage } from "@t-tax/db"
@@ -8,6 +9,18 @@ import { registerIpcHandlers } from "./ipc.js"
 import { SecretVault } from "./secrets.js"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "ttax-vault",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true
+    }
+  }
+])
 
 if (process.env.TTAX_USER_DATA_DIR) {
   app.setPath("userData", process.env.TTAX_USER_DATA_DIR)
@@ -73,6 +86,28 @@ app.whenReady().then(() => {
   const defaultWs = service.ensureWorkspace()
   let activeWorkspaceId = defaultWs.id
   const secrets = new SecretVault(userDataDir)
+
+  protocol.handle("ttax-vault", async (req) => {
+    try {
+      const url = new URL(req.url)
+      if (url.hostname !== "file") return new Response("Not Found", { status: 404 })
+      const parts = url.pathname.split("/").filter(Boolean)
+      if (parts.length !== 2) return new Response("Bad Request", { status: 400 })
+      const [wsId, fileId] = parts.map(decodeURIComponent)
+      if (!wsId || !fileId) return new Response("Bad Request", { status: 400 })
+      const info = service.getVaultFilePath(wsId, fileId)
+      const buf = await readFile(info.absPath)
+      return new Response(new Uint8Array(buf), {
+        status: 200,
+        headers: {
+          "Content-Type": info.mimetype,
+          "Cache-Control": "private, max-age=300"
+        }
+      })
+    } catch {
+      return new Response("Not Found", { status: 404 })
+    }
+  })
 
   const preloadPath = join(__dirname, "../preload/index.cjs")
   const devUrl = process.env.ELECTRON_RENDERER_URL

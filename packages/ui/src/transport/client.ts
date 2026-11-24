@@ -1,13 +1,16 @@
 import React, { createContext, useContext } from "react"
 import type {
+  AccountLedgerRow,
   AccountingRegime,
   AuditIssue,
   BatchAnalyzeProgressEvent,
   DocumentAnalysisOutcome,
   GdtCaptchaChallenge,
   GdtInvoiceSummary,
+  HkdTaxSectorCode,
   LLMProviderConfig,
   LineItemDTO,
+  OpeningBalanceRow,
   OutgoingInvoiceTemplateData,
   ParsedEInvoice,
   TransactionDirection,
@@ -103,13 +106,20 @@ export interface TTaxTransport {
   batchApproveCleanXml: (workspaceId: string, fileIds: string[]) => Promise<{ approved: number; skipped: number }>
   approveFileToTransaction: (workspaceId: string, fileId: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>
   splitFileItems: (workspaceId: string, fileId: string, items: LineItemDTO[], baseMeta: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>
-  deleteFile: (workspaceId: string, fileId: string) => Promise<boolean>
+  deleteFile: (workspaceId: string, fileId: string, opts?: { force?: boolean }) => Promise<boolean>
+  getFileRawUrl?: (workspaceId: string, fileId: string) => string
+  revealFileInFolder?: (workspaceId: string, fileId: string) => Promise<boolean>
 
   // Batch Converter
   batchProcessXml: (workspaceId: string, files: IngestFilePayload[], saveToLedger: boolean) => Promise<BatchXmlResultItem[]>
+  batchProcessXmlSession?: (workspaceId: string, files: IngestFilePayload[]) => Promise<{ batchId: string; items: BatchXmlResultItem[] }>
+  commitBatchXmlSession?: (workspaceId: string, batchId: string, selectedIndices?: number[]) => Promise<{ batchId: string; items: BatchXmlResultItem[] }>
   renderParsedXmlHtml: (parsed: ParsedEInvoice, signature?: XmlSignatureVerification) => Promise<string>
   savePdfFromHtml: (defaultFilename: string, html: string) => Promise<{ savedPath?: string; canceled?: boolean }>
   saveBatchPdfsFromHtml: (items: Array<{ filename: string; html: string }>) => Promise<{ folderPath?: string; count: number; canceled?: boolean }>
+  exportBatchXmlExcel?: (
+    items: Array<{ filename: string; status: string; parsed?: ParsedEInvoice; signature?: XmlSignatureVerification; issueSummary?: string }>
+  ) => Promise<{ savedPath?: string; canceled?: boolean }>
 
   // Transactions & Dashboard
   listTransactions: (workspaceId: string, filters?: Record<string, unknown>) => Promise<{
@@ -148,6 +158,31 @@ export interface TTaxTransport {
     input: { dateFrom?: string; dateTo?: string; voucherDate: string }
   ) => Promise<{ posted: boolean; amountVnd: number; voucherNo?: string; message?: string }>
   getTrialBalance: (workspaceId: string, opts?: { dateFrom?: string; dateTo?: string }) => Promise<TrialBalanceRow[]>
+  listOpeningBalances?: (workspaceId: string) => Promise<OpeningBalanceRow[]>
+  saveOpeningBalances?: (workspaceId: string, rows: OpeningBalanceRow[]) => Promise<OpeningBalanceRow[]>
+  getAccountLedger?: (
+    workspaceId: string,
+    accountCode: string,
+    opts?: { dateFrom?: string; dateTo?: string }
+  ) => Promise<{
+    accountCode: string
+    accountName: string
+    openingBalance: number
+    rows: AccountLedgerRow[]
+    totalDebit: number
+    totalCredit: number
+    closingBalance: number
+  }>
+  exportAccountLedgerExcel?: (
+    workspaceId: string,
+    accountCode: string,
+    opts?: { dateFrom?: string; dateTo?: string }
+  ) => Promise<{ savedPath?: string; canceled?: boolean }>
+  exportHkdBookExcel?: (
+    workspaceId: string,
+    sectorCode: HkdTaxSectorCode,
+    filters?: Record<string, unknown>
+  ) => Promise<{ savedPath?: string; canceled?: boolean }>
   listCounterparties: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
   updateCounterparty: (
     workspaceId: string,
@@ -158,12 +193,14 @@ export interface TTaxTransport {
   refreshCounterpartyRisk: (workspaceId: string, taxCode: string) => Promise<Record<string, unknown>>
   importBankStatement: (workspaceId: string, filename: string, base64: string, bankCode: string) => Promise<Record<string, unknown>>
   listBankStatements: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
+  addBankMatch?: (workspaceId: string, statementId: string, transactionId: string, allocatedAmountVnd?: number) => Promise<void>
+  removeBankMatch?: (workspaceId: string, statementId: string, transactionId?: string) => Promise<void>
   confirmBankMatch: (workspaceId: string, statementId: string, transactionId: string) => Promise<void>
   unmatchBankStatement: (workspaceId: string, statementId: string) => Promise<void>
   quickPostBankStatement: (
     workspaceId: string,
     statementId: string,
-    input: { kind: "bank_fee" | "interest" | "custom"; name?: string; categoryCode?: string }
+    input: { kind: "bank_fee" | "interest" | "cash_transfer" | "custom"; name?: string; categoryCode?: string; counterAccountCode?: string }
   ) => Promise<Record<string, unknown>>
 
   // Mini-Apps & Import/Export/Backup
@@ -315,8 +352,15 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     batchApproveCleanXml: (wsId, fileIds) => post("/rpc", { method: "batchApproveCleanXml", args: [wsId, fileIds] }),
     approveFileToTransaction: (wsId, fileId, input) => post("/rpc", { method: "approveFileToTransaction", args: [wsId, fileId, input] }),
     splitFileItems: (wsId, fileId, items, meta) => post("/rpc", { method: "splitFileItems", args: [wsId, fileId, items, meta] }),
-    deleteFile: (wsId, fileId) => post("/rpc", { method: "deleteFile", args: [wsId, fileId] }),
+    deleteFile: (wsId, fileId, opts) => post("/rpc", { method: "deleteFile", args: [wsId, fileId, opts] }),
+    getFileRawUrl: (wsId, fileId) => `${baseUrl}/files/${encodeURIComponent(wsId)}/${encodeURIComponent(fileId)}/raw`,
+    revealFileInFolder: (wsId, fileId) => post("/rpc", { method: "revealFileInFolder", args: [wsId, fileId] }),
     batchProcessXml: (wsId, files, save) => post("/rpc", { method: "batchProcessXml", args: [wsId, files, save] }),
+    batchProcessXmlSession: (wsId, files) => post("/rpc", { method: "batchProcessXmlSession", args: [wsId, files] }),
+    commitBatchXmlSession: (wsId, batchId, selectedIndices) =>
+      post("/rpc", { method: "commitBatchXmlSession", args: [wsId, batchId, selectedIndices] }),
+    exportBatchXmlExcel: (items) =>
+      downloadFile("/export-custom", { type: "batch_xml", items }, "ket_qua_quet_xml.xlsx"),
     renderParsedXmlHtml: (parsed, sig) => post("/rpc", { method: "renderParsedXmlHtml", args: [parsed, sig] }),
     savePdfFromHtml: async (filename, html) => {
       const w = window.open("", "_blank")
@@ -362,12 +406,21 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     createManualJournalEntry: (wsId, inp) => post("/rpc", { method: "createManualJournalEntry", args: [wsId, inp] }),
     postVatClosingEntry: (wsId, inp) => post("/rpc", { method: "postVatClosingEntry", args: [wsId, inp] }),
     getTrialBalance: (wsId, opts) => post("/rpc", { method: "getTrialBalance", args: [wsId, opts] }),
+    listOpeningBalances: (wsId) => post("/rpc", { method: "listOpeningBalances", args: [wsId] }),
+    saveOpeningBalances: (wsId, rows) => post("/rpc", { method: "saveOpeningBalances", args: [wsId, rows] }),
+    getAccountLedger: (wsId, accCode, opts) => post("/rpc", { method: "getAccountLedger", args: [wsId, accCode, opts] }),
+    exportAccountLedgerExcel: (wsId, accCode, opts) =>
+      downloadFile("/export-custom", { type: "ledger", workspaceId: wsId, accountCode: accCode, filters: opts }, `so_tk_${accCode}.xlsx`),
+    exportHkdBookExcel: (wsId, sectorCode, filters) =>
+      downloadFile("/export-custom", { type: "hkd", workspaceId: wsId, sectorCode, filters }, `so_hkd_${sectorCode}.xlsx`),
     listCounterparties: (wsId) => post("/rpc", { method: "listCounterparties", args: [wsId] }),
     updateCounterparty: (wsId, id, patch) => post("/rpc", { method: "updateCounterparty", args: [wsId, id, patch] }),
     batchRefreshCounterparties: (wsId) => post("/rpc", { method: "batchRefreshCounterparties", args: [wsId] }),
     refreshCounterpartyRisk: (wsId, mst) => post("/rpc", { method: "refreshCounterpartyRisk", args: [wsId, mst] }),
     importBankStatement: (wsId, fname, b64, code) => post("/rpc", { method: "importBankStatement", args: [wsId, fname, b64, code] }),
     listBankStatements: (wsId) => post("/rpc", { method: "listBankStatements", args: [wsId] }),
+    addBankMatch: (wsId, sid, tid, amt) => post("/rpc", { method: "addBankMatch", args: [wsId, sid, tid, amt] }),
+    removeBankMatch: (wsId, sid, tid) => post("/rpc", { method: "removeBankMatch", args: [wsId, sid, tid] }),
     confirmBankMatch: (wsId, sid, tid) => post("/rpc", { method: "confirmBankMatch", args: [wsId, sid, tid] }),
     unmatchBankStatement: (wsId, sid) => post("/rpc", { method: "unmatchBankStatement", args: [wsId, sid] }),
     quickPostBankStatement: (wsId, sid, inp) => post("/rpc", { method: "quickPostBankStatement", args: [wsId, sid, inp] }),

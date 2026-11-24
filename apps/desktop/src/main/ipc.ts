@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import { basename, join } from "node:path"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -236,9 +236,14 @@ export function registerIpcHandlers(params: {
         return res
       }
       case "deleteFile": {
-        const ok = service.deleteFile(args[0] as string, args[1] as string)
+        const ok = service.deleteFile(args[0] as string, args[1] as string, args[2] as never)
         params.onCountsChanged()
         return ok
+      }
+      case "revealFileInFolder": {
+        const info = service.getVaultFilePath(args[0] as string, args[1] as string)
+        shell.showItemInFolder(info.absPath)
+        return true
       }
 
       case "batchProcessXml": {
@@ -251,6 +256,19 @@ export function registerIpcHandlers(params: {
           save
         )
         if (save) params.onCountsChanged()
+        return res
+      }
+      case "batchProcessXmlSession": {
+        const wsId = args[0] as string
+        const rawFiles = args[1] as Array<{ filename: string; mimetype?: string; base64: string }>
+        return service.batchProcessXmlSession(
+          wsId,
+          rawFiles.map((f) => ({ filename: f.filename, mimetype: f.mimetype, buffer: Buffer.from(f.base64, "base64") }))
+        )
+      }
+      case "commitBatchXmlSession": {
+        const res = await service.commitBatchXmlSession(args[0] as string, args[1] as string, args[2] as number[] | undefined)
+        params.onCountsChanged()
         return res
       }
       case "renderParsedXmlHtml":
@@ -342,6 +360,12 @@ export function registerIpcHandlers(params: {
         return service.postVatClosingEntry(args[0] as string, args[1] as never)
       case "getTrialBalance":
         return service.getTrialBalance(args[0] as string, args[1] as never)
+      case "listOpeningBalances":
+        return service.listOpeningBalances(args[0] as string)
+      case "saveOpeningBalances":
+        return service.saveOpeningBalances(args[0] as string, args[1] as never)
+      case "getAccountLedger":
+        return service.getAccountLedger(args[0] as string, args[1] as string, args[2] as never)
       case "listCounterparties":
         return service.listCounterparties(args[0] as string)
       case "updateCounterparty":
@@ -362,6 +386,14 @@ export function registerIpcHandlers(params: {
       }
       case "listBankStatements":
         return service.listBankStatements(args[0] as string)
+      case "addBankMatch":
+        service.addBankMatch(args[0] as string, args[1] as string, args[2] as string, args[3] as number | undefined)
+        params.onCountsChanged()
+        return
+      case "removeBankMatch":
+        service.removeBankMatch(args[0] as string, args[1] as string, args[2] as string | undefined)
+        params.onCountsChanged()
+        return
       case "confirmBankMatch":
         service.confirmBankMatch(args[0] as string, args[1] as string, args[2] as string)
         params.onCountsChanged()
@@ -479,6 +511,33 @@ export function registerIpcHandlers(params: {
         })
         if (saveRes.canceled || !saveRes.filePath) return { canceled: true }
         writeFileSync(saveRes.filePath, res.buffer)
+        return { savedPath: saveRes.filePath }
+      }
+      case "exportAccountLedgerExcel": {
+        const res = await service.exportAccountLedgerExcel(args[0] as string, args[1] as string, args[2] as never)
+        const saveRes = await dialog.showSaveDialog({
+          defaultPath: join(app.getPath("downloads"), safeAsciiFilename(res.filename))
+        })
+        if (saveRes.canceled || !saveRes.filePath) return { canceled: true }
+        await writeFile(saveRes.filePath, res.buffer)
+        return { savedPath: saveRes.filePath }
+      }
+      case "exportHkdBookExcel": {
+        const res = await service.exportHkdBookExcel(args[0] as string, args[1] as never, args[2] as never)
+        const saveRes = await dialog.showSaveDialog({
+          defaultPath: join(app.getPath("downloads"), safeAsciiFilename(res.filename))
+        })
+        if (saveRes.canceled || !saveRes.filePath) return { canceled: true }
+        await writeFile(saveRes.filePath, res.buffer)
+        return { savedPath: saveRes.filePath }
+      }
+      case "exportBatchXmlExcel": {
+        const res = await service.exportBatchXmlExcel(args[0] as never)
+        const saveRes = await dialog.showSaveDialog({
+          defaultPath: join(app.getPath("downloads"), safeAsciiFilename(res.filename))
+        })
+        if (saveRes.canceled || !saveRes.filePath) return { canceled: true }
+        await writeFile(saveRes.filePath, res.buffer)
         return { savedPath: saveRes.filePath }
       }
       case "previewTabularImport":

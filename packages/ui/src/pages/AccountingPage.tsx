@@ -14,7 +14,15 @@ import {
   ArrowRightLeft,
   Landmark
 } from "lucide-react"
-import type { HkdTaxSectorCode, TrialBalanceRow, UiPreferences, WorkspaceDTO } from "@t-tax/core"
+import type {
+  AccountLedgerRow,
+  BankMatchItem,
+  HkdTaxSectorCode,
+  OpeningBalanceRow,
+  TrialBalanceRow,
+  UiPreferences,
+  WorkspaceDTO
+} from "@t-tax/core"
 import { HKD_TAX_SECTORS } from "@t-tax/core/browser"
 import { useTransport, fileToPayload } from "../transport/client.js"
 import { MoneyInput } from "../components/MoneyInput.js"
@@ -22,6 +30,8 @@ import { formatDateVi, formatMoney } from "../utils/format.js"
 
 interface AccountingProps {
   workspace: WorkspaceDTO
+  initialTab?: "journal" | "trial_balance" | "vat" | "hkd" | "bank"
+  openNewVoucherSignal?: number
   onRefreshCounts?: () => void
   onToast: (msg: string, tone?: "ok" | "warn" | "err") => void
 }
@@ -69,6 +79,8 @@ interface BankStmtRow {
     issuedAt: string | null
     totalAmount: number
   } | null
+  matches?: BankMatchItem[]
+  matchedTotalVnd?: number
 }
 
 interface AccountOption {
@@ -245,9 +257,9 @@ function AccountCombobox({
   )
 }
 
-export function AccountingPage({ workspace, onRefreshCounts, onToast }: AccountingProps) {
+export function AccountingPage({ workspace, initialTab, openNewVoucherSignal, onRefreshCounts, onToast }: AccountingProps) {
   const transport = useTransport()
-  const [tab, setTab] = useState<"journal" | "trial_balance" | "vat" | "hkd" | "bank">("journal")
+  const [tab, setTab] = useState<"journal" | "trial_balance" | "vat" | "hkd" | "bank">(initialTab ?? "journal")
   const [period, setPeriod] = useState<"all" | "month" | "quarter" | "year">("all")
   const [hkdSector, setHkdSector] = useState<HkdTaxSectorCode>(() => loadHkdSector())
 
@@ -261,6 +273,19 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
   const [bankFilter, setBankFilter] = useState<"all" | "matched" | "suggested" | "unmatched">("all")
   const [selectedStmtId, setSelectedStmtId] = useState<string | null>(null)
   const [txMatchSearch, setTxMatchSearch] = useState("")
+  const [customBankAccount, setCustomBankAccount] = useState("334")
+
+  const [showOpeningModal, setShowOpeningModal] = useState(false)
+  const [openingDraft, setOpeningDraft] = useState<OpeningBalanceRow[]>([])
+  const [ledgerDrawer, setLedgerDrawer] = useState<{
+    accountCode: string
+    accountName: string
+    openingBalance: number
+    rows: AccountLedgerRow[]
+    totalDebit: number
+    totalCredit: number
+    closingBalance: number
+  } | null>(null)
 
   const [showManualJeModal, setShowManualJeModal] = useState(false)
   const [manualJe, setManualJe] = useState({
@@ -271,6 +296,33 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
     creditAccount: "1121",
     amountVnd: 0
   })
+
+  useEffect(() => {
+    if (initialTab) setTab(initialTab)
+  }, [initialTab])
+
+  useEffect(() => {
+    if (openNewVoucherSignal && openNewVoucherSignal > 0) {
+      setTab("journal")
+      setShowManualJeModal(true)
+    }
+  }, [openNewVoucherSignal])
+
+  useEffect(() => {
+    if (!ledgerDrawer && !showOpeningModal && !showManualJeModal) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return
+      if (ledgerDrawer) {
+        setLedgerDrawer(null)
+      } else if (showOpeningModal) {
+        setShowOpeningModal(false)
+      } else if (showManualJeModal) {
+        setShowManualJeModal(false)
+      }
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [ledgerDrawer, showOpeningModal, showManualJeModal])
 
   const range = useMemo(() => {
     const r = getPeriodRange(period)
@@ -369,33 +421,92 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
     }
   }
 
+  const handleAddBankMatch = async (stmtId: string, txId: string, amt?: number) => {
+    if (transport.addBankMatch) {
+      await transport.addBankMatch(workspace.id, stmtId, txId, amt)
+    } else {
+      await transport.confirmBankMatch(workspace.id, stmtId, txId)
+    }
+    onRefreshCounts?.()
+    onToast("Đã ghép đối chiếu thanh toán!", "ok")
+    loadAll()
+  }
+
   const handleConfirmMatch = async (stmtId: string, txId: string) => {
-    await transport.confirmBankMatch(workspace.id, stmtId, txId)
+    await handleAddBankMatch(stmtId, txId)
+  }
+
+  const handleUnmatch = async (stmtId: string, txId?: string) => {
+    if (transport.removeBankMatch) {
+      await transport.removeBankMatch(workspace.id, stmtId, txId)
+    } else {
+      await transport.unmatchBankStatement(workspace.id, stmtId)
+    }
     onRefreshCounts?.()
-    onToast("Đã xác nhận đối chiếu thanh toán 3 bên!", "ok")
+    onToast("Đã hủy ghép đối chiếu sao kê.", "ok")
     loadAll()
   }
 
-  const handleUnmatch = async (stmtId: string) => {
-    await transport.unmatchBankStatement(workspace.id, stmtId)
-    onRefreshCounts?.()
-    onToast("Đã hủy ghép đối chiếu dòng sao kê.", "ok")
-    loadAll()
-  }
-
-  const handleQuickPostBank = async (stmtId: string, kind: "bank_fee" | "interest") => {
+  const handleQuickPostBank = async (
+    stmtId: string,
+    kind: "bank_fee" | "interest" | "cash_transfer" | "custom",
+    counterAccountCode?: string
+  ) => {
     try {
-      await transport.quickPostBankStatement(workspace.id, stmtId, { kind })
+      await transport.quickPostBankStatement(workspace.id, stmtId, { kind, counterAccountCode })
       onRefreshCounts?.()
-      onToast(
+      const msg =
         kind === "bank_fee"
           ? "Đã hạch toán Phí NH (Nợ 6425 / Có 1121) & khớp sao kê."
-          : "Đã hạch toán Lãi tiền gửi (Nợ 1121 / Có 515) & khớp sao kê.",
-        "ok"
-      )
+          : kind === "interest"
+            ? "Đã hạch toán Lãi tiền gửi (Nợ 1121 / Có 515) & khớp sao kê."
+            : kind === "cash_transfer"
+              ? "Đã hạch toán Rút/Nộp tiền mặt (1111 ↔ 1121) & khớp sao kê."
+              : `Đã hạch toán sao kê đối ứng TK ${counterAccountCode || "liên quan"} & khớp.`
+      onToast(msg, "ok")
       loadAll()
     } catch (err) {
       onToast(err instanceof Error ? err.message : "Lỗi hạch toán nhanh sao kê", "err")
+    }
+  }
+
+  const openOpeningModal = async () => {
+    try {
+      const existing = (await transport.listOpeningBalances?.(workspace.id)) ?? []
+      setOpeningDraft(
+        existing.length > 0
+          ? existing
+          : [
+              { accountCode: "1111", openingDebit: 0, openingCredit: 0 },
+              { accountCode: "1121", openingDebit: 0, openingCredit: 0 },
+              { accountCode: "411", openingDebit: 0, openingCredit: 0 }
+            ]
+      )
+      setShowOpeningModal(true)
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Không tải được Số dư đầu kỳ", "err")
+    }
+  }
+
+  const handleSaveOpening = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      await transport.saveOpeningBalances?.(workspace.id, openingDraft)
+      setShowOpeningModal(false)
+      onToast("Đã lưu Số dư đầu kỳ & cập nhật Bảng cân đối.", "ok")
+      loadAll()
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Lỗi lưu Số dư đầu kỳ", "err")
+    }
+  }
+
+  const openAccountLedger = async (accountCode: string) => {
+    if (!transport.getAccountLedger) return
+    try {
+      const data = await transport.getAccountLedger(workspace.id, accountCode, range)
+      setLedgerDrawer(data)
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Không mở được Sổ chi tiết tài khoản", "err")
     }
   }
 
@@ -496,6 +607,14 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
     return bankRows.filter((b) => b.matchStatus !== "matched" && b.matchStatus !== "suggested")
   }, [bankRows, bankFilter])
 
+  const bankScrollRef = useRef<HTMLDivElement | null>(null)
+  const bankVirtualizer = useVirtualizer({
+    count: filteredBankRows.length,
+    getScrollElement: () => bankScrollRef.current,
+    estimateSize: () => 44,
+    overscan: 14
+  })
+
   const selectedStmt = bankRows.find((b) => b.id === selectedStmtId) ?? null
 
   const candidateInvoices = useMemo(() => {
@@ -573,10 +692,29 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
               </button>
             </>
           )}
+          {tab === "trial_balance" && (
+            <button type="button" onClick={openOpeningModal} className="gb hl">
+              <Plus size={13} />
+              <span>Số dư đầu kỳ</span>
+            </button>
+          )}
           {tab === "vat" && (
             <button type="button" onClick={handleVatClosing} className="pb">
               <ArrowRightLeft size={13} />
               <span>Kết chuyển GTGT cuối kỳ</span>
+            </button>
+          )}
+          {tab === "hkd" && transport.exportHkdBookExcel && (
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await transport.exportHkdBookExcel!(workspace.id, hkdSector, range)
+                if (!res.canceled && res.savedPath) onToast(`Đã xuất Sổ S1/S2-HKD: ${res.savedPath}`, "ok")
+              }}
+              className="pb"
+            >
+              <Download size={13} />
+              <span>Xuất Sổ S1/S2-HKD</span>
             </button>
           )}
           <button type="button" onClick={() => transport.exportReport(workspace.id, "htkk_in", range)} className="gb">
@@ -696,8 +834,15 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                     </tr>
                   ) : (
                     trialRows.map((row) => (
-                      <tr key={row.code} className="hover:bg-[var(--hover)]">
-                        <td className="py-2 px-3 font-mono font-semibold text-[var(--cyan)] tnum">{row.code}</td>
+                      <tr
+                        key={row.code}
+                        onClick={() => openAccountLedger(row.code)}
+                        className="hover:bg-[var(--hover)] cursor-pointer"
+                        title="Click để xem Sổ chi tiết tài khoản (General Ledger)"
+                      >
+                        <td className="py-2 px-3 font-mono font-semibold text-[var(--cyan)] tnum underline decoration-dotted underline-offset-4">
+                          {row.code}
+                        </td>
                         <td className="py-2 px-3">{row.name}</td>
                         <td className="py-2 px-3 text-right tnum text-[var(--muted)]">{formatMoney(row.openingDebit)}</td>
                         <td className="py-2 px-3 text-right tnum text-[var(--muted)]">{formatMoney(row.openingCredit)}</td>
@@ -728,7 +873,7 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
         )}
 
         {tab === "vat" && (
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto space-y-4">
             <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
               <table className="w-full text-left border-collapse text-[12.5px]">
                 <thead className="bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
@@ -760,6 +905,66 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                   )}
                 </tbody>
               </table>
+            </div>
+
+            {/* Detailed VAT Invoices List */}
+            <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-[var(--line)] bg-[var(--raised)] flex items-center justify-between text-[11.5px] font-semibold text-[var(--text)]">
+                <span>Bảng kê chi tiết hóa đơn GTGT trong kỳ ({txRows.length} chứng từ)</span>
+              </div>
+              <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
+                <table className="w-full text-left border-collapse text-[12px]">
+                  <thead className="sticky top-0 bg-[var(--sheet-bg)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
+                    <tr>
+                      <th className="py-2 px-3">Loại</th>
+                      <th className="py-2 px-3">Ngày HĐ</th>
+                      <th className="py-2 px-3">Ký hiệu / Số HĐ</th>
+                      <th className="py-2 px-3">Đối tác / MST</th>
+                      <th className="py-2 px-3">Thuế suất</th>
+                      <th className="py-2 px-3 text-right">Doanh số chưa thuế</th>
+                      <th className="py-2 px-3 text-right">Thuế GTGT</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--line)]">
+                    {txRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="py-8 text-center text-[var(--dim)]">
+                          Chưa có hóa đơn GTGT nào trong kỳ.
+                        </td>
+                      </tr>
+                    ) : (
+                      txRows.slice(0, 300).map((t) => {
+                        const fx = Number(t.fxRateDecimal ?? 1) || 1
+                        const preVnd = Math.round(Number(t.preTaxAmount ?? 0) * fx)
+                        const vatVnd = Math.round(Number(t.vatAmount ?? 0) * fx)
+                        const isOut = t.direction === "output"
+                        return (
+                          <tr key={String(t.id)} className="hover:bg-[var(--hover)]">
+                            <td className="py-2 px-3">
+                              <span className={`tag ${isOut ? "tag-info" : ""}`}>{isOut ? "Bán ra" : "Mua vào"}</span>
+                            </td>
+                            <td className="py-2 px-3 tnum whitespace-nowrap text-[var(--muted)]">
+                              {formatDateVi(String(t.issuedAt ?? ""))}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-[11.5px] tnum whitespace-nowrap">
+                              {String(t.invoiceSymbol ?? "")} {String(t.invoiceNumber || "—")}
+                            </td>
+                            <td className="py-2 px-3 max-w-[220px]">
+                              <div className="truncate font-medium">{String(t.merchant || t.name || "—")}</div>
+                              <div className="text-[10.5px] text-[var(--dim)] tnum">{String(t.merchantTaxCode ?? "")}</div>
+                            </td>
+                            <td className="py-2 px-3 tnum">{String(t.vatRateCode || "—")}</td>
+                            <td className="py-2 px-3 text-right tnum">{formatMoney(preVnd)}</td>
+                            <td className={`py-2 px-3 text-right tnum font-semibold ${isOut ? "text-[var(--amber)]" : "text-[var(--cyan)]"}`}>
+                              {formatMoney(vatVnd)}
+                            </td>
+                          </tr>
+                        )
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
@@ -809,8 +1014,84 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                 </div>
               </div>
             </div>
-            <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 text-[12px] text-[var(--muted)]">
-              Chế độ Hộ kinh doanh (lộ trình bỏ thuế khoán 2026): tự động phân tách chứng từ đầu ra từ máy tính tiền (`1C26M...`) vào Sổ doanh thu S1-HKD và chi phí hợp lệ vào S2-HKD.
+
+            {/* Detailed S1-HKD & S2-HKD Tables */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
+                <div className="px-4 py-2.5 border-b border-[var(--line)] bg-[var(--raised)] text-[12px] font-semibold">
+                  Sổ Doanh thu S1-HKD ({txRows.filter((t) => t.direction === "output").length} dòng)
+                </div>
+                <div className="max-h-[280px] overflow-y-auto">
+                  <table className="w-full text-left border-collapse text-[11.5px]">
+                    <thead className="sticky top-0 bg-[var(--sheet-bg)] text-[10px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
+                      <tr>
+                        <th className="py-2 px-3">Ngày</th>
+                        <th className="py-2 px-3">Số HĐ</th>
+                        <th className="py-2 px-3">Nội dung</th>
+                        <th className="py-2 px-3 text-right">Doanh thu</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--line)]">
+                      {txRows.filter((t) => t.direction === "output").length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="py-6 text-center text-[var(--dim)]">Chưa phát sinh doanh thu S1-HKD.</td>
+                        </tr>
+                      ) : (
+                        txRows
+                          .filter((t) => t.direction === "output")
+                          .map((t) => (
+                            <tr key={String(t.id)} className="hover:bg-[var(--hover)]">
+                              <td className="py-1.5 px-3 tnum whitespace-nowrap text-[var(--muted)]">{formatDateVi(String(t.issuedAt ?? ""))}</td>
+                              <td className="py-1.5 px-3 font-mono tnum">{String(t.invoiceNumber || "—")}</td>
+                              <td className="py-1.5 px-3 truncate max-w-[180px]">{String(t.name || t.merchant || "—")}</td>
+                              <td className="py-1.5 px-3 text-right tnum font-semibold text-[var(--green)]">
+                                {formatMoney(Number(t.convertedTotalVnd ?? t.totalAmount ?? 0))}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
+                <div className="px-4 py-2.5 border-b border-[var(--line)] bg-[var(--raised)] text-[12px] font-semibold">
+                  Sổ Chi phí S2-HKD ({txRows.filter((t) => t.direction !== "output").length} dòng)
+                </div>
+                <div className="max-h-[280px] overflow-y-auto">
+                  <table className="w-full text-left border-collapse text-[11.5px]">
+                    <thead className="sticky top-0 bg-[var(--sheet-bg)] text-[10px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
+                      <tr>
+                        <th className="py-2 px-3">Ngày</th>
+                        <th className="py-2 px-3">Số HĐ</th>
+                        <th className="py-2 px-3">Nội dung</th>
+                        <th className="py-2 px-3 text-right">Chi phí</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--line)]">
+                      {txRows.filter((t) => t.direction !== "output").length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="py-6 text-center text-[var(--dim)]">Chưa phát sinh chi phí S2-HKD.</td>
+                        </tr>
+                      ) : (
+                        txRows
+                          .filter((t) => t.direction !== "output")
+                          .map((t) => (
+                            <tr key={String(t.id)} className="hover:bg-[var(--hover)]">
+                              <td className="py-1.5 px-3 tnum whitespace-nowrap text-[var(--muted)]">{formatDateVi(String(t.issuedAt ?? ""))}</td>
+                              <td className="py-1.5 px-3 font-mono tnum">{String(t.invoiceNumber || "—")}</td>
+                              <td className="py-1.5 px-3 truncate max-w-[180px]">{String(t.name || t.merchant || "—")}</td>
+                              <td className="py-1.5 px-3 text-right tnum font-semibold text-[var(--rose)]">
+                                {formatMoney(Number(t.convertedTotalVnd ?? t.totalAmount ?? 0))}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -865,62 +1146,68 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
               <span className="text-[11.5px] text-[var(--muted)] tnum">{filteredBankRows.length} giao dịch</span>
             </div>
 
-            {/* Independent Scroll 2-Pane Bank Reconciliation Workbench */}
+            {/* Virtualized 2-Pane Bank Reconciliation Workbench */}
             <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-7 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-y-auto min-h-0">
-                <table className="w-full text-left border-collapse text-[12px]">
-                  <thead className="sticky top-0 bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
-                    <tr>
-                      <th className="py-2.5 px-3">Ngày GD</th>
-                      <th className="py-2.5 px-3">Nội dung chuyển khoản</th>
-                      <th className="py-2.5 px-3 text-right">Tiền ra</th>
-                      <th className="py-2.5 px-3 text-right">Tiền vào</th>
-                      <th className="py-2.5 px-3">Đối chiếu</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[var(--line)]">
-                    {filteredBankRows.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="py-10 text-center text-[var(--dim)]">
-                          Chưa có dòng sao kê ngân hàng nào.
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredBankRows.map((b) => {
+              <div className="lg:col-span-7 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] flex flex-col min-h-0 overflow-hidden">
+                <div
+                  style={{ gridTemplateColumns: "86px minmax(140px,1fr) 106px 106px 96px" }}
+                  className="bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)] grid gap-2 px-3 py-2.5 shrink-0 font-semibold"
+                >
+                  <div>Ngày GD</div>
+                  <div>Nội dung CK</div>
+                  <div className="text-right">Tiền ra</div>
+                  <div className="text-right">Tiền vào</div>
+                  <div>Đối chiếu</div>
+                </div>
+                {filteredBankRows.length === 0 ? (
+                  <div className="flex-1 grid place-items-center text-[12px] text-[var(--dim)] p-8">
+                    Chưa có dòng sao kê ngân hàng nào.
+                  </div>
+                ) : (
+                  <div ref={bankScrollRef} className="flex-1 min-h-0 overflow-y-auto">
+                    <div style={{ height: `${bankVirtualizer.getTotalSize()}px`, position: "relative" }}>
+                      {bankVirtualizer.getVirtualItems().map((vr) => {
+                        const b = filteredBankRows[vr.index]!
                         const active = b.id === selectedStmtId
+                        const mCount = b.matches?.length ?? 0
                         return (
-                          <tr
+                          <div
                             key={b.id}
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              left: 0,
+                              width: "100%",
+                              height: `${vr.size}px`,
+                              transform: `translateY(${vr.start}px)`,
+                              gridTemplateColumns: "86px minmax(140px,1fr) 106px 106px 96px"
+                            }}
                             onClick={() => setSelectedStmtId(b.id)}
-                            className={`cursor-pointer ${active ? "bg-[var(--cyan-s)]" : "hover:bg-[var(--hover)]"}`}
+                            className={`grid gap-2 items-center px-3 border-b border-[var(--line)] cursor-pointer text-[12px] ${
+                              active ? "bg-[var(--cyan-s)]" : "hover:bg-[var(--hover)]"
+                            }`}
                           >
-                            <td className="py-2.5 px-3 tnum whitespace-nowrap">{formatDateVi(b.txDate)}</td>
-                            <td className="py-2.5 px-3 max-w-[230px] truncate">{b.description}</td>
-                            <td className="py-2.5 px-3 text-right tnum text-[var(--rose)]">
-                              {b.debitAmount > 0 ? formatMoney(b.debitAmount) : "—"}
-                            </td>
-                            <td className="py-2.5 px-3 text-right tnum text-[var(--green)]">
-                              {b.creditAmount > 0 ? formatMoney(b.creditAmount) : "—"}
-                            </td>
-                            <td className="py-2.5 px-3">
+                            <div className="tnum whitespace-nowrap text-[11.5px]">{formatDateVi(b.txDate)}</div>
+                            <div className="truncate">{b.description}</div>
+                            <div className="text-right tnum text-[var(--rose)]">{b.debitAmount > 0 ? formatMoney(b.debitAmount) : "—"}</div>
+                            <div className="text-right tnum text-[var(--green)]">{b.creditAmount > 0 ? formatMoney(b.creditAmount) : "—"}</div>
+                            <div>
                               {b.matchStatus === "matched" ? (
-                                <span className="tag tag-ok">
-                                  <CheckCircle2 size={10} /> Đã khớp
+                                <span className="tag tag-ok tnum">
+                                  <CheckCircle2 size={10} /> {mCount > 1 ? `Khớp (${mCount})` : "Đã khớp"}
                                 </span>
                               ) : b.matchStatus === "suggested" && b.matchedTransactionId ? (
-                                <span className="tag tag-warn tnum">
-                                  Gợi ý {Math.round((b.matchConfidence ?? 0.8) * 100)}%
-                                </span>
+                                <span className="tag tag-warn tnum">Gợi ý {Math.round((b.matchConfidence ?? 0.8) * 100)}%</span>
                               ) : (
                                 <span className="tag">Chưa khớp</span>
                               )}
-                            </td>
-                          </tr>
+                            </div>
+                          </div>
                         )
-                      })
-                    )}
-                  </tbody>
-                </table>
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Independent Scroll Right Match Inspector */}
@@ -942,44 +1229,82 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                           : `+${formatMoney(selectedStmt.creditAmount)}`}
                       </div>
                       <p className="text-[12px] text-[var(--muted)] leading-relaxed">{selectedStmt.description}</p>
+                      {(selectedStmt.matches?.length ?? 0) > 0 && (
+                        <div className="pt-1 flex items-center justify-between text-[11px] tnum">
+                          <span className="text-[var(--green)] font-semibold">
+                            Đã đối chiếu: {formatMoney(selectedStmt.matchedTotalVnd ?? 0)}
+                          </span>
+                          <span className="text-[var(--muted)]">
+                            Chênh lệch: {formatMoney(Math.max(selectedStmt.debitAmount, selectedStmt.creditAmount) - (selectedStmt.matchedTotalVnd ?? 0))}
+                          </span>
+                        </div>
+                      )}
                     </div>
 
-                    {selectedStmt.matchedTransaction ? (
+                    {/* Multi-Invoice Matches List (1-N) */}
+                    {(selectedStmt.matches?.length ?? 0) > 0 ? (
                       <div className="p-3 rounded-[11px] border border-[var(--line2)] bg-[var(--raised)] space-y-2 shrink-0">
                         <div className="flex items-center justify-between text-[11px]">
                           <span className="font-semibold text-[var(--text)]">
-                            {selectedStmt.matchStatus === "matched" ? "Hóa đơn đã khớp" : "Gợi ý khớp tự động"}
+                            Hóa đơn đã đối chiếu ({selectedStmt.matches!.length})
                           </span>
+                          <button type="button" onClick={() => handleUnmatch(selectedStmt.id)} className="text-[var(--rose)] hover:underline">
+                            Hủy tất cả
+                          </button>
+                        </div>
+                        <div className="space-y-1.5">
+                          {selectedStmt.matches!.map((m) => (
+                            <div key={m.transactionId} className="flex items-center justify-between gap-2 text-[11.5px] py-1 border-t border-[var(--line)]">
+                              <div className="min-w-0">
+                                <div className="font-medium truncate">{m.merchant || "Giao dịch"}</div>
+                                <div className="text-[10.5px] text-[var(--muted)] tnum">
+                                  HĐ {m.invoiceNumber || "—"} · {formatDateVi(m.issuedAt)}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="tnum font-semibold text-[var(--cyan)]">{formatMoney(m.allocatedAmountVnd)}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnmatch(selectedStmt.id, m.transactionId)}
+                                  className="text-[var(--rose)] hover:bg-[var(--rose-s)] px-1.5 py-0.5 rounded"
+                                  title="Gỡ hóa đơn này"
+                                >
+                                  <Unlink size={11.5} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : selectedStmt.matchedTransaction ? (
+                      <div className="p-3 rounded-[11px] border border-[var(--line2)] bg-[var(--raised)] space-y-2 shrink-0">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="font-semibold text-[var(--text)]">Gợi ý khớp tự động</span>
                           <span className="tnum text-[var(--cyan)] font-semibold">
                             {formatMoney(selectedStmt.matchedTransaction.totalAmount)}
                           </span>
                         </div>
-                        <div className="text-[12px] font-medium text-[var(--text)]">
-                          {selectedStmt.matchedTransaction.merchant || "—"}
-                        </div>
+                        <div className="text-[12px] font-medium text-[var(--text)]">{selectedStmt.matchedTransaction.merchant || "—"}</div>
                         <div className="text-[11px] text-[var(--muted)] tnum">
-                          HĐ {selectedStmt.matchedTransaction.invoiceNumber || "—"} ·{" "}
-                          {formatDateVi(selectedStmt.matchedTransaction.issuedAt)}
+                          HĐ {selectedStmt.matchedTransaction.invoiceNumber || "—"} · {formatDateVi(selectedStmt.matchedTransaction.issuedAt)}
                         </div>
                         <div className="flex items-center gap-2 pt-1">
-                          {selectedStmt.matchStatus === "suggested" && (
-                            <button
-                              type="button"
-                              onClick={() => handleConfirmMatch(selectedStmt.id, selectedStmt.matchedTransaction!.id)}
-                              className="pb"
-                            >
-                              <CheckCircle2 size={13} />
-                              <span>Xác nhận khớp</span>
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleConfirmMatch(selectedStmt.id, selectedStmt.matchedTransaction!.id)}
+                            className="pb"
+                          >
+                            <CheckCircle2 size={13} />
+                            <span>Xác nhận khớp</span>
+                          </button>
                           <button type="button" onClick={() => handleUnmatch(selectedStmt.id)} className="gb text-[var(--rose)]">
                             <Unlink size={13} />
-                            <span>Hủy ghép</span>
+                            <span>Bỏ qua</span>
                           </button>
                         </div>
                       </div>
                     ) : (
-                      <div className="p-3 rounded-[11px] border border-[var(--line)] bg-[var(--raised)] space-y-2 shrink-0">
+                      <div className="p-3 rounded-[11px] border border-[var(--line)] bg-[var(--raised)] space-y-2.5 shrink-0">
                         <div className="text-[11.5px] font-semibold text-[var(--text)] flex items-center gap-1.5">
                           <Landmark size={13} className="text-[var(--cyan)]" />
                           <span>Không có hóa đơn? Hạch toán nhanh giao dịch ngân hàng</span>
@@ -992,7 +1317,7 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                               className="gb hl"
                             >
                               <Plus size={12.5} />
-                              <span>Tạo Phiếu chi Phí NH (TK 6425)</span>
+                              <span>Phí NH (TK 6425)</span>
                             </button>
                           ) : (
                             <button
@@ -1001,16 +1326,41 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                               className="gb hl"
                             >
                               <Plus size={12.5} />
-                              <span>Ghi nhận Lãi tiền gửi (TK 515)</span>
+                              <span>Lãi TG (TK 515)</span>
                             </button>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => handleQuickPostBank(selectedStmt.id, "cash_transfer")}
+                            className="gb"
+                          >
+                            <ArrowRightLeft size={12.5} />
+                            <span>{selectedStmt.debitAmount > 0 ? "Rút nhập quỹ (1111)" : "Nộp tiền mặt (1111)"}</span>
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-1.5 pt-1 border-t border-[var(--line)]">
+                          <input
+                            value={customBankAccount}
+                            onChange={(e) => setCustomBankAccount(e.target.value)}
+                            placeholder="TK đối ứng (VD: 334, 3335)"
+                            className="w-[150px] h-7 px-2 rounded-[7px] bg-[var(--panel)] border border-[var(--line)] font-mono text-[11px] tnum"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleQuickPostBank(selectedStmt.id, "custom", customBankAccount)}
+                            className="gb"
+                          >
+                            <span>Hạch toán TK</span>
+                          </button>
                         </div>
                       </div>
                     )}
 
-                    {/* Manual Candidate Search */}
+                    {/* Manual Candidate Search (supports adding additional invoices for 1-N matching) */}
                     <div className="space-y-2 pt-2 border-t border-[var(--line)] flex-1 min-h-0 flex flex-col">
-                      <div className="text-[11.5px] font-semibold text-[var(--text)] shrink-0">Ghép thủ công với Hóa đơn / Giao dịch</div>
+                      <div className="text-[11.5px] font-semibold text-[var(--text)] shrink-0">
+                        Ghép Hóa đơn / Giao dịch {(selectedStmt.matches?.length ?? 0) > 0 ? "(hỗ trợ ghép gộp nhiều HĐ)" : ""}
+                      </div>
                       <div className="relative shrink-0">
                         <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--dim)]" />
                         <input
@@ -1024,7 +1374,7 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                       <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5">
                         {candidateInvoices.map((cand) => {
                           const cid = String(cand.id)
-                          const isSame = selectedStmt.matchedTransactionId === cid && selectedStmt.matchStatus === "matched"
+                          const isSame = Boolean(selectedStmt.matches?.some((m) => m.transactionId === cid))
                           return (
                             <div
                               key={cid}
@@ -1042,11 +1392,17 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
                               <button
                                 type="button"
                                 disabled={isSame}
-                                onClick={() => handleConfirmMatch(selectedStmt.id, cid)}
+                                onClick={() =>
+                                  handleAddBankMatch(
+                                    selectedStmt.id,
+                                    cid,
+                                    Number(cand.convertedTotalVnd ?? cand.totalAmount ?? 0)
+                                  )
+                                }
                                 className="gb shrink-0"
                               >
                                 <Link2 size={12} />
-                                <span>{isSame ? "Đang khớp" : "Khớp"}</span>
+                                <span>{isSame ? "Đã ghép" : (selectedStmt.matches?.length ?? 0) > 0 ? "+ Ghép thêm" : "Khớp"}</span>
                               </button>
                             </div>
                           )
@@ -1146,6 +1502,180 @@ export function AccountingPage({ workspace, onRefreshCounts, onToast }: Accounti
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Opening Balances Modal */}
+      {showOpeningModal && (
+        <div
+          className="fixed inset-0 z-[115] grid place-items-center bg-black/45 p-4"
+          onClick={() => setShowOpeningModal(false)}
+        >
+          <form
+            onSubmit={handleSaveOpening}
+            onClick={(e) => e.stopPropagation()}
+            className="glass-overlay w-full max-w-[560px] rounded-[16px] p-5 space-y-3 max-h-[82vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-[15px] font-bold">Thiết lập Số dư đầu kỳ tài khoản</h3>
+                <p className="text-[11px] text-[var(--muted)]">Áp dụng khi nhập sổ giữa năm tài chính. Tổng Nợ phải bằng Tổng Có.</p>
+              </div>
+              <button type="button" onClick={() => setShowOpeningModal(false)}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {openingDraft.map((row, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                  <input
+                    value={row.accountCode}
+                    onChange={(e) => {
+                      const next = [...openingDraft]
+                      next[idx] = { ...row, accountCode: e.target.value }
+                      setOpeningDraft(next)
+                    }}
+                    placeholder="Số hiệu TK"
+                    className="col-span-3 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] font-mono text-[12px] tnum"
+                  />
+                  <MoneyInput
+                    value={row.openingDebit}
+                    onChange={(v) => {
+                      const next = [...openingDraft]
+                      next[idx] = { ...row, openingDebit: v }
+                      setOpeningDraft(next)
+                    }}
+                    className="col-span-4 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                  />
+                  <MoneyInput
+                    value={row.openingCredit}
+                    onChange={(v) => {
+                      const next = [...openingDraft]
+                      next[idx] = { ...row, openingCredit: v }
+                      setOpeningDraft(next)
+                    }}
+                    className="col-span-4 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setOpeningDraft(openingDraft.filter((_, i) => i !== idx))}
+                    className="col-span-1 h-8 rounded-[8px] grid place-items-center text-[var(--rose)] hover:bg-[var(--rose-s)]"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--line)]">
+              <button
+                type="button"
+                onClick={() => setOpeningDraft([...openingDraft, { accountCode: "", openingDebit: 0, openingCredit: 0 }])}
+                className="gb"
+              >
+                <Plus size={13} /> Thêm dòng TK
+              </button>
+              <div className="text-[11.5px] tnum">
+                Nợ: <strong>{formatMoney(openingDraft.reduce((s, r) => s + r.openingDebit, 0))}</strong> · Có:{" "}
+                <strong>{formatMoney(openingDraft.reduce((s, r) => s + r.openingCredit, 0))}</strong>
+              </div>
+              <button type="submit" className="pb">
+                Lưu Đầu kỳ
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Account General Ledger Drill-down Drawer */}
+      {ledgerDrawer && (
+        <div
+          className="fixed inset-0 z-[115] flex justify-end bg-black/35"
+          onClick={() => setLedgerDrawer(null)}
+        >
+          <div
+            className="glass-overlay w-full max-w-[740px] h-full flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-[var(--line)] flex items-center justify-between gap-2 shrink-0">
+              <div className="min-w-0">
+                <div className="text-[15px] font-bold truncate">
+                  Sổ chi tiết Tài khoản {ledgerDrawer.accountCode} — {ledgerDrawer.accountName}
+                </div>
+                <div className="text-[11.5px] text-[var(--muted)] tnum">
+                  Dư đầu kỳ: <strong>{formatMoney(ledgerDrawer.openingBalance)}</strong> · Dư cuối kỳ:{" "}
+                  <strong className="text-[var(--cyan)]">{formatMoney(ledgerDrawer.closingBalance)}</strong>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {transport.exportAccountLedgerExcel && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const res = await transport.exportAccountLedgerExcel!(workspace.id, ledgerDrawer.accountCode, range)
+                      if (!res.canceled && res.savedPath) onToast(`Đã xuất Sổ chi tiết TK: ${res.savedPath}`, "ok")
+                    }}
+                    className="gb"
+                  >
+                    <Download size={13} />
+                    <span>Xuất Excel Sổ TK</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setLedgerDrawer(null)}
+                  className="w-8 h-8 rounded-full grid place-items-center hover:bg-[var(--hover)]"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-auto">
+              <table className="w-full text-left border-collapse text-[12px]">
+                <thead className="sticky top-0 bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
+                  <tr>
+                    <th className="py-2.5 px-3">Ngày CT</th>
+                    <th className="py-2.5 px-3">Số CT</th>
+                    <th className="py-2.5 px-3">Diễn giải</th>
+                    <th className="py-2.5 px-3">TK ĐƯ</th>
+                    <th className="py-2.5 px-3 text-right">Phát sinh Nợ</th>
+                    <th className="py-2.5 px-3 text-right">Phát sinh Có</th>
+                    <th className="py-2.5 px-3 text-right">Dư lũy tiến</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--line)]">
+                  {ledgerDrawer.rows.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-10 text-center text-[var(--dim)]">
+                        Không có phát sinh trong kỳ cho tài khoản này.
+                      </td>
+                    </tr>
+                  ) : (
+                    ledgerDrawer.rows.map((r, i) => (
+                      <tr key={i} className="hover:bg-[var(--hover)]">
+                        <td className="py-2 px-3 tnum whitespace-nowrap text-[var(--muted)]">{formatDateVi(r.voucherDate)}</td>
+                        <td className="py-2 px-3 font-mono text-[11px] tnum whitespace-nowrap">{r.voucherNo}</td>
+                        <td className="py-2 px-3 truncate max-w-[210px]">{r.description}</td>
+                        <td className="py-2 px-3 font-mono text-[11.5px] text-[var(--cyan)] tnum">{r.counterAccount}</td>
+                        <td className="py-2 px-3 text-right tnum">{r.debitAmount > 0 ? formatMoney(r.debitAmount) : "—"}</td>
+                        <td className="py-2 px-3 text-right tnum">{r.creditAmount > 0 ? formatMoney(r.creditAmount) : "—"}</td>
+                        <td className="py-2 px-3 text-right tnum font-semibold">{formatMoney(r.runningBalance)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="px-5 py-3 border-t border-[var(--line)] bg-[var(--sheet-bg)] flex items-center justify-between text-[12px] font-semibold tnum shrink-0">
+              <span>Tổng phát sinh ({ledgerDrawer.rows.length} dòng)</span>
+              <div className="flex items-center gap-4">
+                <span>Nợ: {formatMoney(ledgerDrawer.totalDebit)}</span>
+                <span>Có: {formatMoney(ledgerDrawer.totalCredit)}</span>
+                <span className="text-[var(--cyan)]">Dư cuối: {formatMoney(ledgerDrawer.closingBalance)}</span>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

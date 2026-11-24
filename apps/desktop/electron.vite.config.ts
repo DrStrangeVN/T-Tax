@@ -37,6 +37,7 @@ export default defineConfig({
       }
     },
     build: {
+      minify: "esbuild",
       rollupOptions: {
         input: {
           index: resolve("src/renderer/index.html"),
@@ -45,7 +46,9 @@ export default defineConfig({
         output: {
           manualChunks(id) {
             const nid = id.replace(/\\/g, "/")
-            if (nid.includes("/node_modules/recharts/") || nid.includes("/node_modules/d3-")) return "vendor-charts"
+            if (nid.includes("/node_modules/react/") || nid.includes("/node_modules/react-dom/") || nid.includes("/node_modules/scheduler/")) {
+              return "vendor-react"
+            }
             if (nid.includes("/node_modules/lucide-react/")) return "vendor-icons"
             return undefined
           }

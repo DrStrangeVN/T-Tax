@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
@@ -152,7 +153,9 @@ app.post("/api/rpc", async (c) => {
       case "splitFileItems":
         return c.json(await service.splitFileItemsToTransactions(args[0] as string, args[1] as string, args[2] as LineItemDTO[], args[3] as never))
       case "deleteFile":
-        return c.json(service.deleteFile(args[0] as string, args[1] as string))
+        return c.json(service.deleteFile(args[0] as string, args[1] as string, args[2] as never))
+      case "revealFileInFolder":
+        return c.json(false)
       case "batchProcessXml": {
         const raw = args[1] as Array<{ filename: string; mimetype?: string; base64: string }>
         return c.json(
@@ -163,6 +166,17 @@ app.post("/api/rpc", async (c) => {
           )
         )
       }
+      case "batchProcessXmlSession": {
+        const raw = args[1] as Array<{ filename: string; mimetype?: string; base64: string }>
+        return c.json(
+          await service.batchProcessXmlSession(
+            args[0] as string,
+            raw.map((f) => ({ filename: f.filename, mimetype: f.mimetype, buffer: Buffer.from(f.base64, "base64") }))
+          )
+        )
+      }
+      case "commitBatchXmlSession":
+        return c.json(await service.commitBatchXmlSession(args[0] as string, args[1] as string, args[2] as number[] | undefined))
       case "renderParsedXmlHtml":
         return c.json(await service.renderParsedXmlHtml(args[0] as never, args[1] as never))
       case "listTransactions":
@@ -202,6 +216,12 @@ app.post("/api/rpc", async (c) => {
         return c.json(service.postVatClosingEntry(args[0] as string, args[1] as never))
       case "getTrialBalance":
         return c.json(service.getTrialBalance(args[0] as string, args[1] as never))
+      case "listOpeningBalances":
+        return c.json(service.listOpeningBalances(args[0] as string))
+      case "saveOpeningBalances":
+        return c.json(service.saveOpeningBalances(args[0] as string, args[1] as never))
+      case "getAccountLedger":
+        return c.json(service.getAccountLedger(args[0] as string, args[1] as string, args[2] as never))
       case "listCounterparties":
         return c.json(service.listCounterparties(args[0] as string))
       case "updateCounterparty":
@@ -214,6 +234,12 @@ app.post("/api/rpc", async (c) => {
         return c.json(await service.importBankStatementAndMatch(args[0] as string, args[1] as string, Buffer.from(args[2] as string, "base64"), args[3] as string))
       case "listBankStatements":
         return c.json(service.listBankStatements(args[0] as string))
+      case "addBankMatch":
+        service.addBankMatch(args[0] as string, args[1] as string, args[2] as string, args[3] as number | undefined)
+        return c.json({ ok: true })
+      case "removeBankMatch":
+        service.removeBankMatch(args[0] as string, args[1] as string, args[2] as string | undefined)
+        return c.json({ ok: true })
       case "confirmBankMatch":
         service.confirmBankMatch(args[0] as string, args[1] as string, args[2] as string)
         return c.json({ ok: true })
@@ -291,9 +317,44 @@ app.post("/api/rpc", async (c) => {
   }
 })
 
+app.get("/api/files/:workspaceId/:fileId/raw", async (c) => {
+  try {
+    const wsId = decodeURIComponent(c.req.param("workspaceId"))
+    const fileId = decodeURIComponent(c.req.param("fileId"))
+    const info = service.getVaultFilePath(wsId, fileId)
+    const buf = await readFile(info.absPath)
+    const isDownload = c.req.query("download") === "1"
+    return new Response(new Uint8Array(buf), {
+      headers: {
+        "Content-Type": info.mimetype,
+        "Content-Disposition": `${isDownload ? "attachment" : "inline"}; filename="${encodeURIComponent(info.filename)}"`,
+        "Cache-Control": "private, max-age=300"
+      }
+    })
+  } catch {
+    return c.text("File not found", 404)
+  }
+})
+
 app.post("/api/export", async (c) => {
   const { workspaceId, kind, filters } = (await c.req.json()) as { workspaceId: string; kind: never; filters?: never }
   const res = await service.exportReport(workspaceId, kind, filters)
+  return new Response(new Uint8Array(res.buffer), {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${res.filename}"`
+    }
+  })
+})
+
+app.post("/api/export-custom", async (c) => {
+  const body = (await c.req.json()) as { type: "ledger" | "hkd" | "batch_xml"; workspaceId?: string; accountCode?: string; sectorCode?: never; filters?: never; items?: never }
+  const res =
+    body.type === "ledger"
+      ? await service.exportAccountLedgerExcel(body.workspaceId!, body.accountCode!, body.filters)
+      : body.type === "hkd"
+        ? await service.exportHkdBookExcel(body.workspaceId!, body.sectorCode!, body.filters)
+        : await service.exportBatchXmlExcel(body.items!)
   return new Response(new Uint8Array(res.buffer), {
     headers: {
       "Content-Type": "application/octet-stream",

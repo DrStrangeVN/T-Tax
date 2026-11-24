@@ -322,4 +322,137 @@ describe("SQLite DB, FTS5, Vault, Excel Export & Backup/Restore", () => {
 
     conn.close()
   })
+
+  it("supports Round-3 Pre-Tax KPIs, Opening Balances, Account Ledger, 1-N Bank Match, Safe File Delete & Selective Batch Session", async () => {
+    const conn = openTTaxDatabase(dbPath)
+    const vault = new VaultStorage(vaultDir)
+    const service = new TTaxService(conn.db, conn.sqlite, vault)
+    const ws = service.ensureWorkspace()
+
+    // 1. Pre-tax KPIs & Operating Profit
+    await service.createManualTransaction(ws.id, {
+      name: "Doanh thu SaaS",
+      direction: "output",
+      preTaxAmount: 20_000_000,
+      vatAmount: 2_000_000,
+      totalAmount: 22_000_000,
+      issuedAt: "2026-07-05"
+    })
+    await service.createManualTransaction(ws.id, {
+      name: "Chi phí máy chủ",
+      direction: "input",
+      preTaxAmount: 5_000_000,
+      vatAmount: 500_000,
+      totalAmount: 5_500_000,
+      issuedAt: "2026-07-06"
+    })
+    const dash = service.getDashboardStats(ws.id)
+    expect(dash.revenuePreTax).toBe(20_000_000)
+    expect(dash.expensePreTax).toBe(5_000_000)
+    expect(dash.operatingProfit).toBe(15_000_000)
+    expect(dash.totalRevenue).toBe(22_000_000)
+    expect(dash.netProfit).toBe(16_500_000)
+
+    // 2. Opening Balances validation + folding into Trial Balance & Account Ledger
+    expect(() =>
+      service.saveOpeningBalances(ws.id, [{ accountCode: "1121", openingDebit: 100_000_000, openingCredit: 0 }])
+    ).toThrow(/cân đối/i)
+
+    service.saveOpeningBalances(ws.id, [
+      { accountCode: "1121", openingDebit: 100_000_000, openingCredit: 0 },
+      { accountCode: "4111", openingDebit: 0, openingCredit: 100_000_000 }
+    ])
+    const tb = service.getTrialBalance(ws.id)
+    const row1121 = tb.find((r) => r.code === "1121")
+    expect(row1121?.openingDebit).toBe(100_000_000)
+
+    service.createManualJournalEntry(ws.id, {
+      voucherDate: "2026-07-07",
+      description: "Chi mua văn phòng phẩm bằng CK",
+      lines: [{ debitAccount: "6427", creditAccount: "1121", amountVnd: 2_000_000 }]
+    })
+    const ledger1121 = service.getAccountLedger(ws.id, "1121")
+    expect(ledger1121.openingBalance).toBe(100_000_000)
+    expect(ledger1121.totalCredit).toBe(2_000_000)
+    expect(ledger1121.closingBalance).toBe(98_000_000)
+    const ledgerExport = await service.exportAccountLedgerExcel(ws.id, "1121")
+    expect(ledgerExport.buffer.byteLength).toBeGreaterThan(1000)
+
+    // 3. 1-N Bank Statement Matching + cash_transfer Quick Post
+    const invA = await service.createManualTransaction(ws.id, {
+      name: "Hóa đơn A",
+      direction: "output",
+      preTaxAmount: 3_000_000,
+      vatAmount: 0,
+      totalAmount: 3_000_000,
+      issuedAt: "2026-07-08"
+    })
+    const invB = await service.createManualTransaction(ws.id, {
+      name: "Hóa đơn B",
+      direction: "output",
+      preTaxAmount: 7_000_000,
+      vatAmount: 0,
+      totalAmount: 7_000_000,
+      issuedAt: "2026-07-09"
+    })
+    await service.importBankStatementAndMatch(
+      ws.id,
+      "multi.csv",
+      Buffer.from(
+        "Ngày giao dịch,Nội dung,Ghi nợ,Ghi có\n2026-07-10,KH THANH TOAN GOP 2 HD,0,10000000\n2026-07-11,RUT TIEN NHAP QUY TM,5000000,0\n",
+        "utf8"
+      ),
+      "VCB"
+    )
+    const stmts = service.listBankStatements(ws.id)
+    const receiptStmt = stmts.find((s) => s.creditAmount === 10_000_000)!
+    service.addBankMatch(ws.id, receiptStmt.id, invA.id, 3_000_000)
+    service.addBankMatch(ws.id, receiptStmt.id, invB.id, 7_000_000)
+    const updatedReceipt = service.listBankStatements(ws.id).find((s) => s.id === receiptStmt.id)!
+    expect(updatedReceipt.matchStatus).toBe("matched")
+    expect(updatedReceipt.matches).toHaveLength(2)
+
+    service.removeBankMatch(ws.id, receiptStmt.id, invA.id)
+    const partialReceipt = service.listBankStatements(ws.id).find((s) => s.id === receiptStmt.id)!
+    expect(partialReceipt.matches).toHaveLength(1)
+
+    const cashStmt = stmts.find((s) => s.debitAmount === 5_000_000)!
+    const cashTx = await service.quickPostBankStatement(ws.id, cashStmt.id, { kind: "cash_transfer" })
+    const cashDetail = service.getTransactionDetail(ws.id, cashTx.id)
+    expect(cashDetail?.journalEntries[0]?.lines?.[0]).toMatchObject({ debitAccount: "1111", creditAccount: "1121" })
+
+    // 4. Safe File Delete + Lock Period Guard
+    const ingSafe = await service.ingestFiles(ws.id, [
+      { filename: "SAFE_00000789.xml", mimetype: "application/xml", buffer: Buffer.from(MINIMAL_XML, "utf8") }
+    ])
+    const safeFileId = ingSafe.createdFiles[0]!.id
+    await service.analyzeFile(ws.id, safeFileId, [])
+    await service.approveFileToTransaction(ws.id, safeFileId, {
+      name: "Cloud VN",
+      direction: "input",
+      preTaxAmount: 10_000_000,
+      vatAmount: 1_000_000,
+      totalAmount: 11_000_000,
+      issuedAt: "2026-06-10"
+    })
+    expect(() => service.deleteFile(ws.id, safeFileId)).toThrow(/gắn với giao dịch/i)
+
+    service.updateWorkspace(ws.id, { lockDate: "2026-06-30" })
+    expect(() => service.deleteFile(ws.id, safeFileId, { force: true })).toThrow(/khóa sổ/i)
+
+    service.updateWorkspace(ws.id, { lockDate: "" })
+    expect(service.deleteFile(ws.id, safeFileId, { force: true })).toBe(true)
+
+    // 5. Selective Batch XML Session
+    const session = await service.batchProcessXmlSession(ws.id, [
+      { filename: "B1.xml", mimetype: "application/xml", buffer: Buffer.from(MINIMAL_XML.replace("00000789", "00009001"), "utf8") },
+      { filename: "B2.xml", mimetype: "application/xml", buffer: Buffer.from(MINIMAL_XML.replace("00000789", "00009002"), "utf8") }
+    ])
+    expect(session.items).toHaveLength(2)
+    await service.commitBatchXmlSession(ws.id, session.batchId, [1])
+    expect(service.listTransactions(ws.id, { search: "00009001" }).total).toBe(0)
+    expect(service.listTransactions(ws.id, { search: "00009002" }).total).toBe(1)
+
+    conn.close()
+  })
 })

@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs"
 import JSZip from "jszip"
 import { format as formatCsv } from "@fast-csv/format"
+import type { AccountLedgerRow, ParsedEInvoice, XmlSignatureVerification } from "../types.js"
 import { safeAsciiFilename } from "./filename-ascii.js"
 import { generateVietQrDataUrl } from "./vietqr.js"
 
@@ -464,4 +465,108 @@ export async function renderOutgoingInvoiceHtml(data: OutgoingInvoiceTemplateDat
   ${data.notes ? `<div style="margin-top:20px;font-size:11.5px;color:#475569"><b>Notes:</b> ${data.notes}</div>` : ""}
 </body>
 </html>`
+}
+
+export async function exportAccountLedgerExcelBuffer(params: {
+  workspaceName: string
+  workspaceTaxCode: string
+  accountCode: string
+  accountName: string
+  openingBalance: number
+  closingBalance: number
+  rows: AccountLedgerRow[]
+}): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet(`SoTK_${params.accountCode}`)
+  ws.addRow([`Đơn vị: ${params.workspaceName}`, `MST: ${params.workspaceTaxCode}`]).font = { bold: true, size: 10 }
+  ws.addRow([`SỔ CHI TIẾT TÀI KHOẢN ${params.accountCode} — ${params.accountName}`]).font = { bold: true, size: 12 }
+  ws.addRow([`Số dư đầu kỳ (Nợ dương / Có âm): ${params.openingBalance.toLocaleString("vi-VN")} VND`])
+  ws.addRow([])
+  const header = ws.addRow(["Ngày CT", "Số CT", "Diễn giải", "TK đối ứng", "Phát sinh Nợ", "Phát sinh Có", "Dư lũy tiến"])
+  styleHeaderRow(header)
+
+  for (const r of params.rows) {
+    const row = ws.addRow([r.voucherDate, r.voucherNo, r.description, r.counterAccount, r.debitAmount, r.creditAmount, r.runningBalance])
+    setTextCell(row.getCell(2), r.voucherNo)
+    setTextCell(row.getCell(4), r.counterAccount)
+    for (const c of [5, 6, 7]) row.getCell(c).numFmt = "#,##0"
+  }
+  const foot = ws.addRow(["", "", "Số dư cuối kỳ", "", "", "", params.closingBalance])
+  foot.font = { bold: true }
+  foot.getCell(7).numFmt = "#,##0"
+  ws.columns = [{ width: 14 }, { width: 16 }, { width: 42 }, { width: 12 }, { width: 16 }, { width: 16 }, { width: 18 }]
+  return Buffer.from(await wb.xlsx.writeBuffer())
+}
+
+export async function exportHkdBookExcelBuffer(params: {
+  workspaceName: string
+  workspaceTaxCode: string
+  sectorLabel: string
+  rows: ExportInvoiceRow[]
+}): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook()
+  const s1 = wb.addWorksheet("S1-HKD Doanh thu")
+  s1.addRow([`HỘ KINH DOANH: ${params.workspaceName}`, `MST: ${params.workspaceTaxCode}`]).font = { bold: true }
+  s1.addRow([`SỔ DOANH THU BÁN HÀNG HÓA, DỊCH VỤ (S1-HKD) — ${params.sectorLabel}`]).font = { bold: true, size: 12 }
+  s1.addRow([])
+  const h1 = s1.addRow(["Ngày chứng từ", "Số hóa đơn", "Khách hàng / MST", "Diễn giải", "Doanh thu tính thuế (VND)"])
+  styleHeaderRow(h1)
+  for (const r of params.rows.filter((x) => x.direction === "output")) {
+    const row = s1.addRow([r.issuedAt ?? "", r.invoiceNumber ?? "", r.merchant ?? "", r.name ?? "", r.convertedTotalVnd ?? r.totalAmount])
+    setTextCell(row.getCell(2), r.invoiceNumber)
+    row.getCell(5).numFmt = "#,##0"
+  }
+  s1.columns = [{ width: 14 }, { width: 14 }, { width: 32 }, { width: 36 }, { width: 22 }]
+
+  const s2 = wb.addWorksheet("S2-HKD Chi phi")
+  s2.addRow([`HỘ KINH DOANH: ${params.workspaceName}`, `MST: ${params.workspaceTaxCode}`]).font = { bold: true }
+  s2.addRow(["SỔ CHI PHÍ SẢN XUẤT, KINH DOANH (S2-HKD)"]).font = { bold: true, size: 12 }
+  s2.addRow([])
+  const h2 = s2.addRow(["Ngày chứng từ", "Số hóa đơn", "Nhà cung cấp", "MST", "Nội dung chi phí", "Tổng chi (VND)"])
+  styleHeaderRow(h2)
+  for (const r of params.rows.filter((x) => x.direction !== "output")) {
+    const row = s2.addRow([r.issuedAt ?? "", r.invoiceNumber ?? "", r.merchant ?? "", r.merchantTaxCode ?? "", r.name ?? "", r.convertedTotalVnd ?? r.totalAmount])
+    setTextCell(row.getCell(2), r.invoiceNumber)
+    setTextCell(row.getCell(4), r.merchantTaxCode)
+    row.getCell(6).numFmt = "#,##0"
+  }
+  s2.columns = [{ width: 14 }, { width: 14 }, { width: 28 }, { width: 15 }, { width: 34 }, { width: 18 }]
+  return Buffer.from(await wb.xlsx.writeBuffer())
+}
+
+export async function exportBatchXmlExcelBuffer(params: {
+  items: Array<{
+    filename: string
+    status: string
+    parsed?: ParsedEInvoice
+    signature?: XmlSignatureVerification
+    issueSummary?: string
+  }>
+}): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet("Ket qua quet XML")
+  const header = ws.addRow(["Tên tệp", "Ngày lập", "Ký hiệu", "Số HĐ", "MST Người bán", "Tên Người bán", "Chữ ký số", "Trước thuế", "Thuế GTGT", "Tổng thanh toán", "Trạng thái", "Lưu ý kiểm toán"])
+  styleHeaderRow(header)
+  for (const it of params.items) {
+    const p = it.parsed
+    const row = ws.addRow([
+      it.filename,
+      p?.issuedDate ?? "",
+      p ? `${p.templateCode}${p.symbol}` : "",
+      p?.invoiceNumber ?? "",
+      p?.seller.taxCode ?? "",
+      p?.seller.name ?? "",
+      it.signature?.status ?? "",
+      p?.totals.totalBeforeVat ?? 0,
+      p?.totals.totalVat ?? 0,
+      p?.totals.totalPayable ?? 0,
+      it.status,
+      it.issueSummary ?? ""
+    ])
+    setTextCell(row.getCell(4), p?.invoiceNumber)
+    setTextCell(row.getCell(5), p?.seller.taxCode)
+    for (const c of [8, 9, 10]) row.getCell(c).numFmt = "#,##0"
+  }
+  ws.columns = [{ width: 24 }, { width: 13 }, { width: 11 }, { width: 12 }, { width: 15 }, { width: 32 }, { width: 14 }, { width: 15 }, { width: 14 }, { width: 16 }, { width: 12 }, { width: 36 }]
+  return Buffer.from(await wb.xlsx.writeBuffer())
 }

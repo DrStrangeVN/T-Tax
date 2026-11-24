@@ -6,6 +6,7 @@ import { formatMoney } from "../utils/format.js"
 
 interface CounterpartiesProps {
   workspace: WorkspaceDTO
+  initialSearch?: string
   onToast: (msg: string, tone?: "ok" | "warn" | "err") => void
 }
 
@@ -29,14 +30,18 @@ const STATUS_LABELS: Record<string, string> = {
   unknown: "Chưa tra cứu"
 }
 
-export function CounterpartiesPage({ workspace, onToast }: CounterpartiesProps) {
+export function CounterpartiesPage({ workspace, initialSearch, onToast }: CounterpartiesProps) {
   const transport = useTransport()
   const [list, setList] = useState<CounterpartyRow[]>([])
   const [categories, setCategories] = useState<Array<Record<string, unknown>>>([])
-  const [search, setSearch] = useState("")
+  const [search, setSearch] = useState(initialSearch ?? "")
   const [lookupMst, setLookupMst] = useState("")
   const [checkingMst, setCheckingMst] = useState<string | null>(null)
   const [batchChecking, setBatchChecking] = useState(false)
+
+  useEffect(() => {
+    if (initialSearch !== undefined) setSearch(initialSearch)
+  }, [initialSearch])
 
   const load = useCallback(async () => {
     const [data, cats] = await Promise.all([

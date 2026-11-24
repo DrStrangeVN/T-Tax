@@ -169,6 +169,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 );
 CREATE INDEX IF NOT EXISTS tx_ws_issued_idx ON transactions(workspace_id, issued_at);
+CREATE INDEX IF NOT EXISTS tx_ws_dir_issued_idx ON transactions(workspace_id, direction, issued_at);
+CREATE INDEX IF NOT EXISTS tx_ws_compliance_idx ON transactions(workspace_id, compliance_status);
 CREATE INDEX IF NOT EXISTS tx_ws_cat_idx ON transactions(workspace_id, category_code);
 CREATE INDEX IF NOT EXISTS tx_ws_proj_idx ON transactions(workspace_id, project_code);
 CREATE INDEX IF NOT EXISTS tx_ws_mst_idx ON transactions(workspace_id, merchant_tax_code);
@@ -289,6 +291,18 @@ CREATE TABLE IF NOT EXISTS journal_lines (
   partner_tax_code TEXT
 );
 CREATE INDEX IF NOT EXISTS jl_entry_idx ON journal_lines(entry_id);
+CREATE INDEX IF NOT EXISTS jl_debit_idx ON journal_lines(debit_account);
+CREATE INDEX IF NOT EXISTS jl_credit_idx ON journal_lines(credit_account);
+
+CREATE TABLE IF NOT EXISTS account_opening_balances (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  account_code TEXT NOT NULL,
+  opening_debit INTEGER NOT NULL DEFAULT 0,
+  opening_credit INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS aob_ws_acc_uq ON account_opening_balances(workspace_id, account_code);
 
 CREATE TABLE IF NOT EXISTS bank_statements (
   id TEXT PRIMARY KEY,
@@ -307,6 +321,18 @@ CREATE TABLE IF NOT EXISTS bank_statements (
   created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 );
 CREATE INDEX IF NOT EXISTS bs_ws_date_idx ON bank_statements(workspace_id, tx_date);
+CREATE INDEX IF NOT EXISTS bs_ws_status_idx ON bank_statements(workspace_id, match_status);
+
+CREATE TABLE IF NOT EXISTS bank_statement_matches (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  statement_id TEXT NOT NULL REFERENCES bank_statements(id) ON DELETE CASCADE,
+  transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+  allocated_amount_vnd INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+CREATE INDEX IF NOT EXISTS bsm_stmt_idx ON bank_statement_matches(statement_id);
+CREATE INDEX IF NOT EXISTS bsm_tx_idx ON bank_statement_matches(transaction_id);
 
 CREATE TABLE IF NOT EXISTS app_data (
   id TEXT PRIMARY KEY,
