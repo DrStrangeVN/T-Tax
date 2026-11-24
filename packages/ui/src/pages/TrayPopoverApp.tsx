@@ -21,7 +21,20 @@ export function TrayPopoverApp() {
 
   useEffect(() => {
     refresh().catch(() => {})
-  }, [])
+    const offDrop = transport.onFilesDroppedFromTray?.(() => {
+      refresh().catch(() => {})
+    })
+    const offTheme = transport.onNativeThemeChange?.((info) => {
+      const light = !info.shouldUseDarkColors
+      document.documentElement.classList.toggle("light", light)
+      document.body.classList.toggle("light", light)
+    })
+    document.body.classList.toggle("platform-macos", transport.platform === "macos")
+    return () => {
+      offDrop?.()
+      offTheme?.()
+    }
+  }, [transport])
 
   const handleFiles = async (fileList: FileList | null) => {
     if (!fileList?.length || !workspaceId) return

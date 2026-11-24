@@ -478,6 +478,14 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
                   onChange={(e) => setGdtCreds({ ...gdtCreds, password: e.target.value })}
                   className="h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
                 />
+                <select
+                  value={gdtCreds.direction}
+                  onChange={(e) => setGdtCreds({ ...gdtCreds, direction: e.target.value as TransactionDirection })}
+                  className="sm:col-span-2 h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                >
+                  <option value="input" className="bg-[var(--panel-solid)]">Hóa đơn Mua vào (Đầu vào)</option>
+                  <option value="output" className="bg-[var(--panel-solid)]">Hóa đơn Bán ra (Đầu ra)</option>
+                </select>
                 <input
                   placeholder="Từ ngày (DD/MM/YYYY)"
                   value={gdtCreds.fromDateDmy}

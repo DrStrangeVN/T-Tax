@@ -141,12 +141,52 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator('input[value="1331"]').first()).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "05-accounting-vas.png") })
 
-    // 7. Toggle Light Mode & verify clean Light Liquid Glass
+    // 7. Batch Converter XML scan & preview
+    await page.click('[data-nav="converter"]')
+    const batchInput = page.locator('main input[type="file"][accept*=".xml"]').first()
+    await batchInput.setInputFiles({
+      name: "BATCH_00004321.xml",
+      mimeType: "application/xml",
+      buffer: Buffer.from(SAMPLE_XML, "utf8")
+    })
+    await expect(page.locator("text=00004321").first()).toBeVisible({ timeout: 10_000 })
+    await page.click('main button:has-text("Xem")')
+    await expect(page.locator('iframe[title="iTaxViewer Preview"]')).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "07-converter.png") })
+
+    // 8. Counterparties MST Registry
+    await page.click('[data-nav="counterparties"]')
+    await expect(page.locator("text=0312000111").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "08-counterparties.png") })
+
+    // 9. Mini-Apps Hub & Outgoing Invoice + VietQR
+    await page.click('[data-nav="apps"]')
+    await expect(page.locator("text=Trình Tạo Hóa đơn & VietQR")).toBeVisible({ timeout: 10_000 })
+    await page.click('button:has-text("Trình Tạo Hóa đơn & VietQR")')
+    await expect(page.locator('iframe[title="Outgoing Invoice Preview"]')).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "09-miniapps-invoice-vietqr.png") })
+
+    // 10. Vault & Settings
+    await page.click('[data-nav="vault"]')
+    await expect(page.locator("text=HD_00004321.xml").first()).toBeVisible({ timeout: 10_000 })
+    await page.click('[data-nav="settings"]')
+    await expect(page.locator("text=Thông tin Pháp nhân & Chế độ Kế toán")).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "10-settings.png") })
+
+    // 11. Toggle Light Mode & verify clean Light Liquid Glass
     await page.click('[title="Đổi Sáng / Tối"]')
     await expect(page.locator("body")).toHaveClass(/light/)
     await page.click('[data-nav="dashboard"]')
     await page.waitForTimeout(300)
     await page.screenshot({ path: join(shotDir, "06-dashboard-light.png") })
+
+    // 12. Verify Tray Popover window rendered & synced
+    const trayWin = app.windows().find((w) => w.url().includes("view=tray"))
+    expect(trayWin).toBeTruthy()
+    if (trayWin) {
+      await expect(trayWin.locator("text=T-Tax Quick Drop")).toBeVisible({ timeout: 10_000 })
+      await trayWin.screenshot({ path: join(shotDir, "11-tray-popover.png") })
+    }
 
     expect(pageErrors).toEqual([])
   } finally {

@@ -408,15 +408,16 @@ export async function renderOutgoingInvoiceHtml(data: OutgoingInvoiceTemplateDat
 <style>
   @page { size: A4; margin: 14mm; }
   body { font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Inter", Arial, sans-serif; color: #141622; margin: 0; padding: 28px; background: #fff; font-variant-numeric: tabular-nums; }
-  .top { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1.5px solid #141622; padding-bottom: 16px; margin-bottom: 18px; }
-  h1 { margin: 0; font-size: 24px; letter-spacing: -0.02em; }
+  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 1.5px solid #141622; padding-bottom: 16px; margin-bottom: 18px; }
+  .top-dates { text-align: right; white-space: nowrap; flex-shrink: 0; font-size: 11.5px; }
+  h1 { margin: 0; font-size: 20px; line-height: 1.25; letter-spacing: -0.02em; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 20px; }
   .box { border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 14px; white-space: pre-line; }
   .box-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748B; font-weight: 600; margin-bottom: 4px; }
   table { width: 100%; border-collapse: collapse; margin-top: 8px; }
   th, td { border-bottom: 1px solid #E2E8F0; padding: 9px 8px; text-align: left; }
   th { font-size: 11px; text-transform: uppercase; color: #475569; background: #F8FAFC; }
-  .r { text-align: right; }
+  .r { text-align: right; white-space: nowrap; }
   .sum-wrap { margin-top: 18px; display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
   .sum-box { width: 280px; margin-left: auto; border: 1px solid #CBD5E1; border-radius: 8px; padding: 12px 14px; }
   .sum-row { display: flex; justify-content: space-between; padding: 3px 0; }
@@ -429,7 +430,7 @@ export async function renderOutgoingInvoiceHtml(data: OutgoingInvoiceTemplateDat
       <h1>${data.title}</h1>
       <div style="color:#475569">#${data.invoiceNumber}</div>
     </div>
-    <div style="text-align:right">
+    <div class="top-dates">
       <div>${lbl.issue}: <b>${data.issueDate}</b></div>
       <div>${lbl.due}: <b>${data.dueDate}</b></div>
     </div>

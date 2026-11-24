@@ -253,7 +253,25 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
       }
       return { savedPath: filename }
     },
-    saveBatchPdfsFromHtml: async () => ({ count: 0, canceled: true }),
+    saveBatchPdfsFromHtml: async (items) => {
+      if (!items.length) return { count: 0, canceled: true }
+      const combinedBodies = items
+        .map((it) => {
+          const match = it.html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+          return `<div class="t-print-page">${match ? match[1] : it.html}</div>`
+        })
+        .join("")
+      const styleMatch = items[0]?.html.match(/<style[^>]*>([\s\S]*?)<\/style>/i)
+      const w = window.open("", "_blank")
+      if (w) {
+        w.document.write(
+          `<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><style>${styleMatch?.[1] ?? ""}\n.t-print-page{page-break-after:always;margin-bottom:24px}.t-print-page:last-child{page-break-after:auto}</style></head><body>${combinedBodies}</body></html>`
+        )
+        w.document.close()
+        w.print()
+      }
+      return { folderPath: "Trình duyệt In PDF", count: items.length }
+    },
     listTransactions: (wsId, filters) => post("/rpc", { method: "listTransactions", args: [wsId, filters] }),
     createTransaction: (wsId, input) => post("/rpc", { method: "createTransaction", args: [wsId, input] }),
     updateTransaction: (wsId, id, patch) => post("/rpc", { method: "updateTransaction", args: [wsId, id, patch] }),
@@ -280,6 +298,30 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     commitTabularImport: (wsId, h, r, m, dir) => post("/rpc", { method: "commitTabularImport", args: [wsId, h, r, m, dir] }),
     renderOutgoingInvoiceHtml: (d) => post("/rpc", { method: "renderOutgoingInvoiceHtml", args: [d] }),
     exportBackupZip: (wsId) => downloadFile("/backup/export", { workspaceId: wsId }, "t_tax_backup.zip"),
-    restoreBackupZip: async () => ({ canceled: true })
+    restoreBackupZip: async () =>
+      new Promise((resolve, reject) => {
+        const input = document.createElement("input")
+        input.type = "file"
+        input.accept = ".zip,application/zip"
+        input.addEventListener("cancel", () => resolve({ canceled: true }))
+        input.addEventListener("change", async () => {
+          const file = input.files?.[0]
+          if (!file) {
+            resolve({ canceled: true })
+            return
+          }
+          try {
+            const payload = await fileToPayload(file)
+            const res = await post<{ workspaceId: string; restoredTransactions: number; restoredFiles: number }>(
+              "/backup/restore",
+              { base64: payload.base64 }
+            )
+            resolve(res)
+          } catch (err) {
+            reject(err)
+          }
+        })
+        input.click()
+      })
   }
 }

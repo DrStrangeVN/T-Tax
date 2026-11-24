@@ -130,9 +130,14 @@ export async function renderEInvoiceHtml(
     text-align: center;
     white-space: nowrap;
   }
+  .tbl-scroll {
+    width: 100%;
+    overflow-x: auto;
+  }
   th.wrap-hdr, td.wrap-cell {
     white-space: normal;
-    overflow-wrap: anywhere;
+    min-width: 112px;
+    overflow-wrap: break-word;
   }
   .r { text-align: right; }
   .c { text-align: center; }
@@ -203,6 +208,7 @@ export async function renderEInvoiceHtml(
       <div class="party-row"><span>Hình thức thanh toán:</span><span>${esc(invoice.paymentMethod)}</span></div>
     </div>
 
+    <div class="tbl-scroll">
     <table>
       <thead>
         <tr>
@@ -221,6 +227,7 @@ export async function renderEInvoiceHtml(
         ${rowsHtml}
       </tbody>
     </table>
+    </div>
 
     <div class="totals">
       <table class="totals-table">

@@ -88,6 +88,7 @@ export function createTrayController(params: {
         ? Math.round(trayBounds.y + trayBounds.height + 6)
         : Math.round(display.workArea.y + display.workArea.height - popBounds.height - 8)
     popover.setPosition(x, y, false)
+    popover.webContents.send("ttax:tray-dropped")
     popover.show()
     popover.focus()
   }
@@ -119,6 +120,9 @@ export function createTrayController(params: {
     popover,
     updateTooltip: (unreviewedCount: number) => {
       tray.setToolTip(`T-Tax — ${unreviewedCount} chứng từ chờ duyệt`)
+      if (!popover.isDestroyed()) {
+        popover.webContents.send("ttax:tray-dropped")
+      }
     },
     destroy: () => {
       if (!popover.isDestroyed()) popover.destroy()

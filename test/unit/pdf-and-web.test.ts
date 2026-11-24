@@ -69,6 +69,54 @@ describe("PDF Renderer (Zero Ghostscript), Tabular Import & Web Hono API", () =>
     expect(wsRes.status).toBe(200)
     const wss = (await wsRes.json()) as Array<{ id: string; taxCode: string }>
     expect(wss.length).toBeGreaterThanOrEqual(1)
+    const wsId = wss[0]!.id
+
+    const saveMail = await app.request("/api/rpc", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        method: "saveEmailServer",
+        args: [
+          wsId,
+          {
+            name: "Demo IMAP",
+            provider: "gmail",
+            host: "imap.gmail.com",
+            port: 993,
+            secure: true,
+            username: "ketoan@ttax.vn",
+            password: "app-password-demo",
+            folder: "INBOX"
+          }
+        ]
+      })
+    })
+    expect(saveMail.status).toBe(200)
+
+    const exp = await app.request("/api/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: wsId, kind: "htkk_in" })
+    })
+    expect(exp.status).toBe(200)
+    expect((await exp.arrayBuffer()).byteLength).toBeGreaterThan(1000)
+
+    const bak = await app.request("/api/backup/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: wsId })
+    })
+    expect(bak.status).toBe(200)
+    const bakB64 = Buffer.from(await bak.arrayBuffer()).toString("base64")
+
+    const restoreRes = await app.request("/api/backup/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base64: bakB64 })
+    })
+    expect(restoreRes.status).toBe(200)
+    const restoreJson = (await restoreRes.json()) as { workspaceId: string }
+    expect(restoreJson.workspaceId).toBe(wsId)
 
     rmSync(tmp, { recursive: true, force: true })
   })

@@ -148,18 +148,18 @@ export function BatchConverterPage({ workspace, onRefreshCounts, onToast }: Batc
             <table className="w-full text-left border-collapse text-[12px]">
               <thead className="sticky top-0 bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
                 <tr>
-                  <th className="py-2.5 px-3">Số HĐ / Ký hiệu</th>
-                  <th className="py-2.5 px-3">Ngày</th>
-                  <th className="py-2.5 px-3">Người bán / MST</th>
-                  <th className="py-2.5 px-3 text-right">Tổng tiền</th>
-                  <th className="py-2.5 px-3">Chữ ký & Audit</th>
-                  <th className="py-2.5 px-3 text-right">Xem</th>
+                  <th className="py-2.5 px-2.5">Số HĐ</th>
+                  <th className="py-2.5 px-2">Ngày</th>
+                  <th className="py-2.5 px-2.5">Người bán / MST</th>
+                  <th className="py-2.5 px-2.5 text-right">Tổng tiền</th>
+                  <th className="py-2.5 px-2.5">Audit</th>
+                  <th className="py-2.5 px-2.5 text-right">Xem</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--line)]">
                 {results.map((r, idx) => (
                   <tr key={idx} className="hover:bg-[var(--hover)]">
-                    <td className="py-2.5 px-3 tnum">
+                    <td className="py-2.5 px-2.5 tnum whitespace-nowrap">
                       {r.parsed ? (
                         <>
                           <div className="font-semibold text-[var(--text)]">{r.parsed.invoiceNumber}</div>
@@ -171,15 +171,15 @@ export function BatchConverterPage({ workspace, onRefreshCounts, onToast }: Batc
                         <span className="text-[var(--rose)]">{r.filename}</span>
                       )}
                     </td>
-                    <td className="py-2.5 px-3 tnum text-[var(--muted)]">{formatDateVi(r.parsed?.issuedDate)}</td>
-                    <td className="py-2.5 px-3 max-w-[230px]">
+                    <td className="py-2.5 px-2 tnum text-[var(--muted)] whitespace-nowrap">{formatDateVi(r.parsed?.issuedDate)}</td>
+                    <td className="py-2.5 px-2.5 max-w-[140px]">
                       <div className="truncate font-medium text-[var(--text)]">{r.parsed?.seller.name ?? "—"}</div>
                       <div className="text-[10.5px] text-[var(--dim)] tnum">{r.parsed?.seller.taxCode ?? ""}</div>
                     </td>
-                    <td className="py-2.5 px-3 text-right tnum font-semibold text-[var(--text)]">
+                    <td className="py-2.5 px-2.5 text-right tnum font-semibold text-[var(--text)] whitespace-nowrap">
                       {r.parsed ? formatMoney(r.parsed.totals.totalPayable, r.parsed.currencyCode) : "—"}
                     </td>
-                    <td className="py-2.5 px-3">
+                    <td className="py-2.5 px-2.5">
                       {r.error ? (
                         <span className="tag tag-err">{r.error}</span>
                       ) : (

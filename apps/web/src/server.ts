@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { serve } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto"
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -187,6 +187,37 @@ app.post("/api/rpc", async (c) => {
         return c.json(service.getAppData(args[0] as string, args[1] as string))
       case "saveAppData":
         return c.json(service.saveAppData(args[0] as string, args[1] as string, args[2]))
+      case "saveEmailServer": {
+        const wsId = args[0] as string
+        const form = args[1] as {
+          name: string
+          provider: string
+          host: string
+          port: number
+          secure: boolean
+          username: string
+          password: string
+          folder: string
+        }
+        const curr = service.getAppData<{ servers?: Array<Record<string, unknown>> }>(wsId, "email")
+        const servers = curr.servers ?? []
+        servers.push({
+          id: randomUUID(),
+          name: form.name,
+          provider: form.provider,
+          host: form.host,
+          port: form.port,
+          secure: form.secure,
+          username: form.username,
+          encryptedPassword: encryptStr(form.password),
+          folder: form.folder || "INBOX",
+          allowedExtensions: [".xml", ".pdf", ".zip", ".png", ".jpg", ".jpeg", ".webp"],
+          lastProcessedUid: 0,
+          status: "idle",
+          isActive: true
+        })
+        return c.json(service.saveAppData(wsId, "email", { servers }))
+      }
       case "syncEmailNow":
         return c.json(await service.syncEmailNow(args[0] as string, args[1] as string, decryptStr))
       case "fetchGdtCaptcha":
@@ -241,6 +272,12 @@ app.post("/api/backup/export", async (c) => {
       "Content-Disposition": `attachment; filename="t_tax_backup.zip"`
     }
   })
+})
+
+app.post("/api/backup/restore", async (c) => {
+  const { base64 } = (await c.req.json()) as { base64: string }
+  if (!base64) return c.text("Missing backup ZIP payload", 400)
+  return c.json(await service.restoreBackup(Buffer.from(base64, "base64")))
 })
 
 const staticRoot = join(__dirname, "public")
