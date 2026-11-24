@@ -163,6 +163,8 @@ app.post("/api/rpc", async (c) => {
           )
         )
       }
+      case "renderParsedXmlHtml":
+        return c.json(await service.renderParsedXmlHtml(args[0] as never, args[1] as never))
       case "listTransactions":
         return c.json(service.listTransactions(args[0] as string, args[1] as never))
       case "getTransactionDetail":
@@ -178,7 +180,9 @@ app.post("/api/rpc", async (c) => {
       case "bulkUpdateTransactions":
         return c.json(service.bulkUpdateTransactions(args[0] as string, args[1] as string[], args[2] as never))
       case "deleteTransactions":
-        return c.json(service.deleteTransactions(args[0] as string, args[1] as string[]))
+        return c.json(service.deleteTransactions(args[0] as string, args[1] as string[], args[2] as never))
+      case "reopenTransactionToInbox":
+        return c.json(service.reopenTransactionToInbox(args[0] as string, args[1] as string))
       case "getDashboardStats":
         return c.json(service.getDashboardStats(args[0] as string, args[1] as string | undefined, args[2] as string | undefined))
       case "getSidebarBadgeCounts":
@@ -192,8 +196,18 @@ app.post("/api/rpc", async (c) => {
       case "updateJournalLine":
         service.updateJournalLine(args[0] as string, args[1] as never)
         return c.json({ ok: true })
+      case "createManualJournalEntry":
+        return c.json(service.createManualJournalEntry(args[0] as string, args[1] as never))
+      case "postVatClosingEntry":
+        return c.json(service.postVatClosingEntry(args[0] as string, args[1] as never))
+      case "getTrialBalance":
+        return c.json(service.getTrialBalance(args[0] as string, args[1] as never))
       case "listCounterparties":
         return c.json(service.listCounterparties(args[0] as string))
+      case "updateCounterparty":
+        return c.json(service.updateCounterparty(args[0] as string, args[1] as string, args[2] as never))
+      case "batchRefreshCounterparties":
+        return c.json(await service.batchRefreshCounterparties(args[0] as string))
       case "refreshCounterpartyRisk":
         return c.json(await service.refreshCounterpartyRisk(args[0] as string, args[1] as string))
       case "importBankStatement":
@@ -206,6 +220,8 @@ app.post("/api/rpc", async (c) => {
       case "unmatchBankStatement":
         service.unmatchBankStatement(args[0] as string, args[1] as string)
         return c.json({ ok: true })
+      case "quickPostBankStatement":
+        return c.json(await service.quickPostBankStatement(args[0] as string, args[1] as string, args[2] as never))
       case "getAppData":
         return c.json(service.getAppData(args[0] as string, args[1] as string))
       case "saveAppData":

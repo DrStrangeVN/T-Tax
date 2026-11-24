@@ -125,28 +125,32 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator("text=XML 100%").first()).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "03-unsorted-xml-review.png") })
 
-    // Approve & auto-post
+    // Approve & auto-post + Undo Toast check
     await page.click('button:has-text("Duyệt & Ghi sổ")')
     await expect(page.locator("text=Hộp thư chứng từ đang sạch")).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('button:has-text("Hoàn tác")').first()).toBeVisible({ timeout: 5_000 })
 
-    // 5. Verify Transaction Ledger, Summary Footer & 3-Tab Right Inspector
+    // 5. Verify Transaction Ledger, Summary Footer & Docked Split-Pane Right Inspector
     await page.click('[data-nav="transactions"]')
     await expect(page.locator("text=00004321")).toBeVisible({ timeout: 10_000 })
     await expect(page.locator("text=0312000111")).toBeVisible()
     await expect(page.locator("text=Tổng bộ lọc:")).toBeVisible()
     await page.locator("text=00004321").first().click()
-    await expect(page.locator('button:has-text("Chi tiết & Định khoản")')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('button:has-text("Định khoản")').first()).toBeVisible({ timeout: 10_000 })
     await page.click('button:has-text("Mặt hàng & Cảnh báo")')
     await expect(page.getByText("Thuê bản quyền T-Tax Enterprise", { exact: true })).toBeVisible({ timeout: 10_000 })
-    await page.keyboard.press("Escape")
     await page.screenshot({ path: join(shotDir, "04-transactions-ledger.png") })
+    await page.keyboard.press("Escape")
 
-    // 6. Verify Accounting VAS Journal Entry, Balance Pill & 2-Pane Bank Tab
+    // 6. Verify Accounting VAS Journal Entry, Trial Balance & Balance Pill
     await page.click('[data-nav="accounting"]')
     await expect(page.locator("h1")).toContainText("Kế toán", { timeout: 10_000 })
     await expect(page.locator('input[value="1331"]').first()).toBeVisible({ timeout: 10_000 })
     await expect(page.locator("text=∑Nợ = ∑Có")).toBeVisible()
     await page.screenshot({ path: join(shotDir, "05-accounting-vas.png") })
+    await page.click('button:has-text("Cân đối Tài khoản")')
+    await expect(page.locator("text=Tổng Cân đối Tài khoản").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "05b-accounting-trial-balance.png") })
 
     // Test Command Palette FTS5 Search after tx committed
     await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k")
@@ -167,9 +171,10 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator('iframe[title="iTaxViewer Preview"]')).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "07-converter.png") })
 
-    // 8. Counterparties MST Registry
+    // 8. Counterparties MST Registry (Vietnamese badges)
     await page.click('[data-nav="counterparties"]')
     await expect(page.locator("text=0312000111").first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator("text=Chưa tra cứu").first()).toBeVisible({ timeout: 5_000 })
     await page.screenshot({ path: join(shotDir, "08-counterparties.png") })
 
     // 9. Mini-Apps Hub & Outgoing Invoice + VietQR
@@ -179,11 +184,12 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator('iframe[title="Outgoing Invoice Preview"]')).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "09-miniapps-invoice-vietqr.png") })
 
-    // 10. Vault & Settings
+    // 10. Vault & Settings (including Period Lock)
     await page.click('[data-nav="vault"]')
     await expect(page.locator("text=HD_00004321.xml").first()).toBeVisible({ timeout: 10_000 })
     await page.click('[data-nav="settings"]')
     await expect(page.locator("text=Thông tin Pháp nhân & Chế độ Kế toán")).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator("text=Khóa sổ Kỳ kế toán").first()).toBeVisible({ timeout: 5_000 })
     await page.screenshot({ path: join(shotDir, "10-settings.png") })
 
     // 11. Toggle Light Mode & verify clean Light Liquid Glass

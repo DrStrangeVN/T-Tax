@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from "electron"
 import { randomUUID } from "node:crypto"
 import { basename, join } from "node:path"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { readFile, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import {
   authenticateGdtSession,
   downloadGdtInvoiceXmlZip,
@@ -15,7 +17,9 @@ import {
   type LLMProviderConfig,
   type LineItemDTO,
   type OutgoingInvoiceTemplateData,
-  type TransactionDirection
+  type ParsedEInvoice,
+  type TransactionDirection,
+  type XmlSignatureVerification
 } from "@t-tax/core"
 import type { TTaxService } from "@t-tax/db"
 import type { SecretVault } from "./secrets.js"
@@ -27,10 +31,13 @@ async function renderHtmlListToPdfBuffers(htmlList: string[]): Promise<Buffer[]>
     height: 1123,
     webPreferences: { offscreen: true, sandbox: true }
   })
+  const tmpDir = mkdtempSync(join(tmpdir(), "ttax-pdf-"))
   try {
     const out: Buffer[] = []
-    for (const html of htmlList) {
-      await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+    for (let i = 0; i < htmlList.length; i++) {
+      const htmlPath = join(tmpDir, `doc_${i}.html`)
+      writeFileSync(htmlPath, htmlList[i]!, "utf8")
+      await win.loadFile(htmlPath)
       const pdfBuf = await win.webContents.printToPDF({
         printBackground: true,
         pageSize: "A4",
@@ -41,6 +48,7 @@ async function renderHtmlListToPdfBuffers(htmlList: string[]): Promise<Buffer[]>
     return out
   } finally {
     if (!win.isDestroyed()) win.destroy()
+    rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 
@@ -56,6 +64,7 @@ export function registerIpcHandlers(params: {
   secrets: SecretVault
   getMainWindow: () => BrowserWindow | null
   onCountsChanged: () => void
+  onWorkspaceChanged?: (workspaceId: string) => void
   onBeforeDbRestore?: () => void
   onAfterDbRestore?: () => void
 }) {
@@ -99,6 +108,9 @@ export function registerIpcHandlers(params: {
       case "listWorkspaces":
         service.ensureWorkspace()
         return service.listWorkspaces()
+      case "setActiveWorkspace":
+        params.onWorkspaceChanged?.(String(args[0] || ""))
+        return
       case "createWorkspace":
         return service.createWorkspace(args[0] as Parameters<TTaxService["createWorkspace"]>[0])
       case "updateWorkspace":
@@ -164,11 +176,8 @@ export function registerIpcHandlers(params: {
         const wsId = args[0] as string
         const paths = args[1] as string[]
         const src = (args[2] as "upload" | "drop" | "email" | "gdt" | "tray") || "upload"
-        const res = await service.ingestFiles(
-          wsId,
-          paths.map((fp) => ({ filename: basename(fp), buffer: readFileSync(fp) })),
-          src
-        )
+        const inputs = await Promise.all(paths.map(async (fp) => ({ filename: basename(fp), buffer: await readFile(fp) })))
+        const res = await service.ingestFiles(wsId, inputs, src)
         params.onCountsChanged()
         return res
       }
@@ -244,6 +253,8 @@ export function registerIpcHandlers(params: {
         if (save) params.onCountsChanged()
         return res
       }
+      case "renderParsedXmlHtml":
+        return service.renderParsedXmlHtml(args[0] as ParsedEInvoice, args[1] as XmlSignatureVerification | undefined)
       case "savePdfFromHtml": {
         const defaultName = safeAsciiFilename(String(args[0] || "invoice.pdf"))
         const html = String(args[1] || "")
@@ -253,7 +264,7 @@ export function registerIpcHandlers(params: {
         })
         if (saveRes.canceled || !saveRes.filePath) return { canceled: true }
         const buf = await renderHtmlToPdfBuffer(html)
-        writeFileSync(saveRes.filePath, buf)
+        await writeFile(saveRes.filePath, buf)
         return { savedPath: saveRes.filePath }
       }
       case "saveBatchPdfsFromHtml": {
@@ -266,10 +277,12 @@ export function registerIpcHandlers(params: {
         const outDir = folderRes.filePaths[0]
         mkdirSync(outDir, { recursive: true })
         const bufs = await renderHtmlListToPdfBuffers(items.map((i) => i.html))
-        items.forEach((item, idx) => {
-          const b = bufs[idx]
-          if (b) writeFileSync(join(outDir, safeAsciiFilename(item.filename)), b)
-        })
+        await Promise.all(
+          items.map(async (item, idx) => {
+            const b = bufs[idx]
+            if (b) await writeFile(join(outDir, safeAsciiFilename(item.filename)), b)
+          })
+        )
         return { folderPath: outDir, count: items.length }
       }
 
@@ -277,16 +290,33 @@ export function registerIpcHandlers(params: {
         return service.listTransactions(args[0] as string, args[1] as never)
       case "getTransactionDetail":
         return service.getTransactionDetail(args[0] as string, args[1] as string)
-      case "createTransaction":
-        return service.createManualTransaction(args[0] as string, args[1] as never)
-      case "updateTransaction":
-        return service.updateTransaction(args[0] as string, args[1] as string, args[2] as never, {
+      case "createTransaction": {
+        const tx = await service.createManualTransaction(args[0] as string, args[1] as never)
+        params.onCountsChanged()
+        return tx
+      }
+      case "updateTransaction": {
+        const tx = service.updateTransaction(args[0] as string, args[1] as string, args[2] as never, {
           repostJournal: args[3] !== false
         })
-      case "bulkUpdateTransactions":
-        return service.bulkUpdateTransactions(args[0] as string, args[1] as string[], args[2] as never)
-      case "deleteTransactions":
-        return service.deleteTransactions(args[0] as string, args[1] as string[])
+        params.onCountsChanged()
+        return tx
+      }
+      case "bulkUpdateTransactions": {
+        const n = service.bulkUpdateTransactions(args[0] as string, args[1] as string[], args[2] as never)
+        params.onCountsChanged()
+        return n
+      }
+      case "deleteTransactions": {
+        const n = service.deleteTransactions(args[0] as string, args[1] as string[], args[2] as never)
+        params.onCountsChanged()
+        return n
+      }
+      case "reopenTransactionToInbox": {
+        const res = service.reopenTransactionToInbox(args[0] as string, args[1] as string)
+        params.onCountsChanged()
+        return res
+      }
       case "getDashboardStats":
         return service.getDashboardStats(args[0] as string, args[1] as string | undefined, args[2] as string | undefined)
       case "getSidebarBadgeCounts":
@@ -306,25 +336,45 @@ export function registerIpcHandlers(params: {
       case "updateJournalLine":
         service.updateJournalLine(args[0] as string, args[1] as never)
         return
+      case "createManualJournalEntry":
+        return service.createManualJournalEntry(args[0] as string, args[1] as never)
+      case "postVatClosingEntry":
+        return service.postVatClosingEntry(args[0] as string, args[1] as never)
+      case "getTrialBalance":
+        return service.getTrialBalance(args[0] as string, args[1] as never)
       case "listCounterparties":
         return service.listCounterparties(args[0] as string)
+      case "updateCounterparty":
+        return service.updateCounterparty(args[0] as string, args[1] as string, args[2] as never)
+      case "batchRefreshCounterparties":
+        return service.batchRefreshCounterparties(args[0] as string)
       case "refreshCounterpartyRisk":
         return service.refreshCounterpartyRisk(args[0] as string, args[1] as string)
-      case "importBankStatement":
-        return service.importBankStatementAndMatch(
+      case "importBankStatement": {
+        const res = await service.importBankStatementAndMatch(
           args[0] as string,
           args[1] as string,
           Buffer.from(args[2] as string, "base64"),
           args[3] as string
         )
+        params.onCountsChanged()
+        return res
+      }
       case "listBankStatements":
         return service.listBankStatements(args[0] as string)
       case "confirmBankMatch":
         service.confirmBankMatch(args[0] as string, args[1] as string, args[2] as string)
+        params.onCountsChanged()
         return
       case "unmatchBankStatement":
         service.unmatchBankStatement(args[0] as string, args[1] as string)
+        params.onCountsChanged()
         return
+      case "quickPostBankStatement": {
+        const tx = await service.quickPostBankStatement(args[0] as string, args[1] as string, args[2] as never)
+        params.onCountsChanged()
+        return tx
+      }
 
       case "getAppData":
         return service.getAppData(args[0] as string, args[1] as string)
@@ -464,7 +514,7 @@ export function registerIpcHandlers(params: {
           properties: ["openFile"]
         })
         if (openRes.canceled || !openRes.filePaths[0]) return { canceled: true }
-        const zipBuf = readFileSync(openRes.filePaths[0])
+        const zipBuf = await readFile(openRes.filePaths[0])
         const res = await service.restoreBackup(zipBuf)
         params.onCountsChanged()
         return res

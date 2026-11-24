@@ -12,7 +12,6 @@ import {
   Inbox,
   ChevronRight
 } from "lucide-react"
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts"
 import type { WorkspaceDTO } from "@t-tax/core"
 import { useTransport, smartIngestFileList } from "../transport/client.js"
 import { formatMoney, formatShortVnd } from "../utils/format.js"
@@ -162,6 +161,15 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
     actionItems: []
   }
 
+  const [hoveredPeriod, setHoveredPeriod] = useState<string | null>(null)
+  const maxSeriesVal = useMemo(() => {
+    let m = 1
+    for (const pt of s.monthlySeries) {
+      m = Math.max(m, pt.revenue, pt.expense)
+    }
+    return m
+  }, [s.monthlySeries])
+  const hoveredPoint = s.monthlySeries.find((p) => p.period === hoveredPeriod) ?? null
   const deadline = useMemo(() => getNextVatDeadline(taxPeriod), [taxPeriod])
   const actionItems = s.actionItems ?? []
   const maxCat = s.categoryBreakdown[0]?.total || 1
@@ -283,30 +291,86 @@ export function DashboardPage({ workspace, onNavigate, onOpenTransaction, onRefr
               <span className="tag tnum">{s.monthlySeries.length} kỳ</span>
             </div>
 
-            <div className="h-[250px] w-full">
+            <div className="h-[250px] w-full relative">
               {s.monthlySeries.length === 0 ? (
                 <div className="h-full grid place-items-center text-[12px] text-[var(--dim)]">
                   Chưa có dữ liệu giao dịch trong kỳ. Thả hóa đơn XML/PDF vào cửa sổ để bắt đầu.
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={s.monthlySeries}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" vertical={false} />
-                    <XAxis dataKey="period" stroke="var(--dim)" fontSize={11} />
-                    <YAxis stroke="var(--dim)" fontSize={11} tickFormatter={(v) => formatShortVnd(Number(v))} width={68} />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "var(--menu-bg)",
-                        border: "1px solid var(--line2)",
-                        borderRadius: "10px",
-                        fontSize: "12px",
-                        color: "var(--text)"
-                      }}
-                    />
-                    <Bar dataKey="revenue" name="Doanh thu" fill="#34D399" radius={[4, 4, 0, 0]} maxBarSize={42} />
-                    <Bar dataKey="expense" name="Chi phí" fill="#FB7185" radius={[4, 4, 0, 0]} maxBarSize={42} />
-                  </BarChart>
-                </ResponsiveContainer>
+                <div className="h-full flex flex-col justify-between">
+                  <div className="flex items-center justify-between text-[11px] mb-2">
+                    <div className="flex items-center gap-3">
+                      <span className="flex items-center gap-1.5 text-[var(--muted)]">
+                        <span className="w-2.5 h-2.5 rounded-[3px] bg-[#34D399]" />
+                        Doanh thu
+                      </span>
+                      <span className="flex items-center gap-1.5 text-[var(--muted)]">
+                        <span className="w-2.5 h-2.5 rounded-[3px] bg-[#FB7185]" />
+                        Chi phí
+                      </span>
+                    </div>
+                    {hoveredPoint && (
+                      <div className="tnum text-[var(--text)] flex items-center gap-2.5">
+                        <span className="font-semibold">{hoveredPoint.period}</span>
+                        <span className="text-[#34D399]">+{formatShortVnd(hoveredPoint.revenue)}</span>
+                        <span className="text-[#FB7185]">-{formatShortVnd(hoveredPoint.expense)}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 min-h-0 flex gap-2">
+                    {/* Y-Axis ticks */}
+                    <div className="w-[56px] shrink-0 flex flex-col justify-between text-right text-[10.5px] text-[var(--dim)] tnum pb-6">
+                      <span>{formatShortVnd(maxSeriesVal)}</span>
+                      <span>{formatShortVnd(Math.round(maxSeriesVal * 0.66))}</span>
+                      <span>{formatShortVnd(Math.round(maxSeriesVal * 0.33))}</span>
+                      <span>0 đ</span>
+                    </div>
+
+                    {/* Bars Grid */}
+                    <div className="flex-1 min-w-0 relative flex flex-col">
+                      <div className="flex-1 relative border-l border-b border-[var(--line)] flex items-end justify-around px-3 gap-2">
+                        {[0.33, 0.66, 1].map((r) => (
+                          <div
+                            key={r}
+                            style={{ bottom: `${r * 100}%` }}
+                            className="absolute left-0 right-0 border-t border-dashed border-[var(--line)] pointer-events-none"
+                          />
+                        ))}
+                        {s.monthlySeries.map((pt) => {
+                          const revPct = Math.round((pt.revenue / maxSeriesVal) * 100)
+                          const expPct = Math.round((pt.expense / maxSeriesVal) * 100)
+                          return (
+                            <div
+                              key={pt.period}
+                              onMouseEnter={() => setHoveredPeriod(pt.period)}
+                              onMouseLeave={() => setHoveredPeriod(null)}
+                              className="h-full flex-1 max-w-[96px] flex items-end justify-center gap-1.5 z-10 cursor-pointer"
+                            >
+                              <div
+                                style={{ height: `${pt.revenue > 0 ? Math.max(3, revPct) : 0}%` }}
+                                title={`${pt.period} · Doanh thu: ${formatMoney(pt.revenue, workspace.baseCurrency)}`}
+                                className="w-full max-w-[40px] rounded-t-[4px] bg-[#34D399] transition-all hover:brightness-110"
+                              />
+                              <div
+                                style={{ height: `${pt.expense > 0 ? Math.max(3, expPct) : 0}%` }}
+                                title={`${pt.period} · Chi phí: ${formatMoney(pt.expense, workspace.baseCurrency)}`}
+                                className="w-full max-w-[40px] rounded-t-[4px] bg-[#FB7185] transition-all hover:brightness-110"
+                              />
+                            </div>
+                          )
+                        })}
+                      </div>
+                      <div className="h-6 flex items-center justify-around px-3 text-[10.5px] text-[var(--dim)] tnum">
+                        {s.monthlySeries.map((pt) => (
+                          <span key={pt.period} className="truncate">
+                            {pt.period}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
           </div>

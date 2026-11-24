@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { and, asc, desc, eq, gte, inArray, lte } from "drizzle-orm"
+import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm"
 import {
   analyzeDocumentHybrid,
   applyColumnMapping,
@@ -112,6 +112,15 @@ export class TTaxService {
     return enrichWorkspaceRow(this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, id)).get()!)
   }
 
+  private assertNotLocked(lockDate: string | null | undefined, docDate: string | null | undefined) {
+    if (!lockDate || !docDate) return
+    const d = docDate.slice(0, 10)
+    if (d <= lockDate) {
+      const [y, m, day] = lockDate.split("-")
+      throw new Error(`Kỳ kế toán đã khóa đến hết ngày ${day}/${m}/${y}. Mở Cài đặt -> Khóa sổ để điều chỉnh.`)
+    }
+  }
+
   updateWorkspace(
     workspaceId: string,
     patch: Partial<{
@@ -124,6 +133,7 @@ export class TTaxService {
       address: string | null
       bankDetails: BankDetails | null
       bankDetailsJson: string | null
+      lockDate: string | null
     }>
   ) {
     const { bankDetails, ...rest } = patch
@@ -140,16 +150,34 @@ export class TTaxService {
     return updated ? enrichWorkspaceRow(updated) : undefined
   }
 
-  getSidebarBadgeCounts(workspaceId: string): { unreviewedCount: number; complianceWarnings: number } {
+  getSidebarBadgeCounts(workspaceId: string): {
+    unreviewedCount: number
+    complianceWarnings: number
+    unmatchedBankCount: number
+  } {
     const unrevRow = this.sqlite
-      .prepare("SELECT COUNT(*) AS cnt FROM files WHERE workspace_id = ? AND is_reviewed = 0")
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM files f
+         WHERE f.workspace_id = ? AND f.is_reviewed = 0
+         AND NOT (
+           f.mimetype NOT LIKE '%xml%'
+           AND EXISTS (
+             SELECT 1 FROM files p
+             WHERE p.workspace_id = f.workspace_id AND p.paired_file_id = f.id AND p.mimetype LIKE '%xml%'
+           )
+         )`
+      )
       .get(workspaceId) as { cnt: number }
     const warnRow = this.sqlite
       .prepare("SELECT COUNT(*) AS cnt FROM transactions WHERE workspace_id = ? AND compliance_status IN ('warning', 'error')")
       .get(workspaceId) as { cnt: number }
+    const bankRow = this.sqlite
+      .prepare("SELECT COUNT(*) AS cnt FROM bank_statements WHERE workspace_id = ? AND match_status != 'matched'")
+      .get(workspaceId) as { cnt: number }
     return {
       unreviewedCount: unrevRow?.cnt ?? 0,
-      complianceWarnings: warnRow?.cnt ?? 0
+      complianceWarnings: warnRow?.cnt ?? 0,
+      unmatchedBankCount: bankRow?.cnt ?? 0
     }
   }
 
@@ -573,6 +601,8 @@ export class TTaxService {
       .where(and(eq(schema.files.id, fileId), eq(schema.files.workspaceId, workspaceId)))
       .get()
     if (!ws || !file) throw new Error("Không tìm thấy tệp hoặc Workspace.")
+    const docDate = input.issuedAt ?? new Date().toISOString().slice(0, 10)
+    this.assertNotLocked(ws.lockDate, docDate)
 
     let cachedOutcome: DocumentAnalysisOutcome | null = null
     if (file.cachedParseResultJson) {
@@ -585,7 +615,12 @@ export class TTaxService {
 
     // FX conversion if foreign currency
     let fxRate = "1"
-    let convertedTotalVnd = input.totalAmount
+    const rawPreTax = Math.round(input.preTaxAmount || 0)
+    const rawVat = Math.round(input.vatAmount || 0)
+    const rawTotal = Math.round(input.totalAmount || rawPreTax + rawVat)
+    let convertedPreTaxVnd = rawPreTax
+    let convertedVatVnd = rawVat
+    let convertedTotalVnd = rawTotal
     const baseCur = ws.baseCurrency || "VND"
     const txCur = (input.currencyCode || baseCur).toUpperCase()
     if (txCur !== baseCur) {
@@ -593,14 +628,16 @@ export class TTaxService {
         const fx = await getHistoricalExchangeRate(
           txCur,
           baseCur,
-          input.issuedAt || new Date(),
+          docDate,
           this.createFxCacheAdapter()
         )
         fxRate = fx.rate
-        convertedTotalVnd = convertAmount(input.totalAmount, fxRate, baseCur)
+        convertedPreTaxVnd = convertAmount(rawPreTax, fxRate, baseCur)
+        convertedVatVnd = convertAmount(rawVat, fxRate, baseCur)
+        convertedTotalVnd = convertAmount(rawTotal, fxRate, baseCur)
       } catch {
-        // Keep manual fallback if offline
-        convertedTotalVnd = input.totalAmount
+        // Keep fallback if offline
+        convertedTotalVnd = rawTotal
       }
     }
 
@@ -735,7 +772,7 @@ export class TTaxService {
           .run()
       }
 
-      // Auto-post balanced VAS journal entry
+      // Auto-post balanced VAS journal entry (always normalized to VND)
       this.postAutoJournalInTx(tx, {
         workspaceId,
         regime: ws.accountingRegime as AccountingRegime,
@@ -745,19 +782,56 @@ export class TTaxService {
         categoryCode: input.categoryCode,
         paymentMethod: input.paymentMethod,
         paymentStatus: input.paymentStatus,
-        preTaxAmount: Math.round(input.preTaxAmount || 0),
-        vatAmount: Math.round(input.vatAmount || 0),
+        preTaxAmount: convertedPreTaxVnd,
+        vatAmount: convertedVatVnd,
         totalAmount: convertedTotalVnd,
         merchant: input.merchant,
         merchantTaxCode: input.merchantTaxCode,
         invoiceNumber: input.invoiceNumber,
-        voucherDate: input.issuedAt ?? now.slice(0, 10)
+        voucherDate: docDate
       })
 
-      tx.update(schema.files).set({ isReviewed: true }).where(eq(schema.files.id, file.id)).run()
+      tx.update(schema.files).set({ isReviewed: true }).where(inArray(schema.files.id, fileIds)).run()
     })
 
     return this.db.select().from(schema.transactions).where(eq(schema.transactions.id, txId)).get()!
+  }
+
+  reopenTransactionToInbox(workspaceId: string, txId: string) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    const row = this.db
+      .select()
+      .from(schema.transactions)
+      .where(and(eq(schema.transactions.workspaceId, workspaceId), eq(schema.transactions.id, txId)))
+      .get()
+    if (!row) return { restoredFileIds: [] as string[] }
+    this.assertNotLocked(ws?.lockDate, row.issuedAt)
+
+    const fileIds = (() => {
+      try {
+        return JSON.parse(row.filesJson || "[]") as string[]
+      } catch {
+        return [] as string[]
+      }
+    })()
+
+    this.db.transaction((tx) => {
+      tx.update(schema.bankStatements)
+        .set({ matchedTransactionId: null, matchStatus: "unmatched", matchConfidence: null })
+        .where(and(eq(schema.bankStatements.workspaceId, workspaceId), eq(schema.bankStatements.matchedTransactionId, txId)))
+        .run()
+      tx.delete(schema.einvoiceRecords)
+        .where(and(eq(schema.einvoiceRecords.workspaceId, workspaceId), eq(schema.einvoiceRecords.transactionId, txId)))
+        .run()
+      tx.delete(schema.transactions)
+        .where(and(eq(schema.transactions.workspaceId, workspaceId), eq(schema.transactions.id, txId)))
+        .run()
+      if (fileIds[0]) {
+        tx.update(schema.files).set({ isReviewed: false }).where(eq(schema.files.id, fileIds[0])).run()
+      }
+    })
+
+    return { restoredFileIds: fileIds[0] ? [fileIds[0]] : [] }
   }
 
   private postAutoJournalInTx(
@@ -981,9 +1055,20 @@ export class TTaxService {
       .where(and(eq(schema.files.id, fileId), eq(schema.files.workspaceId, workspaceId)))
       .get()
     if (!file) return false
+    if (file.pairedFileId) {
+      this.db
+        .update(schema.files)
+        .set({ pairedFileId: null })
+        .where(and(eq(schema.files.id, file.pairedFileId), eq(schema.files.workspaceId, workspaceId)))
+        .run()
+    }
     this.vault.deleteFile(file.relativePath)
     this.db.delete(schema.files).where(eq(schema.files.id, fileId)).run()
     return true
+  }
+
+  renderParsedXmlHtml(parsed: ParsedEInvoice, signature?: XmlSignatureVerification) {
+    return renderEInvoiceHtml(parsed, signature)
   }
 
   async batchProcessXmlFiles(
@@ -995,6 +1080,8 @@ export class TTaxService {
     if (!ws) throw new Error("Workspace không tồn tại.")
 
     const unpacked = await unpackIngestBuffers(inputs)
+    const xmlItems = unpacked.filter((item) => item.filename.toLowerCase().endsWith(".xml"))
+    const eagerHtml = xmlItems.length <= 10
     const existingKeys = new Set(
       this.db
         .select({ uniqueKey: schema.einvoiceRecords.uniqueKey })
@@ -1017,8 +1104,7 @@ export class TTaxService {
 
     const ingested = saveToLedger ? await this.ingestFiles(workspaceId, inputs, "upload") : null
 
-    for (const item of unpacked) {
-      if (!item.filename.toLowerCase().endsWith(".xml")) continue
+    for (const item of xmlItems) {
       try {
         const rawXml = item.buffer.toString("utf8")
         const parsed = extractTT78Xml(rawXml)
@@ -1027,7 +1113,7 @@ export class TTaxService {
           existingUniqueKeys: existingKeys,
           signatureVerification: sig
         })
-        const htmlPreview = await renderEInvoiceHtml(parsed, sig)
+        const htmlPreview = eagerHtml ? await renderEInvoiceHtml(parsed, sig) : undefined
 
         const hasErr = audit.issues.some((i) => i.severity === "error")
         const hasWarn = audit.issues.some((i) => i.severity === "warning")
@@ -1135,26 +1221,21 @@ export class TTaxService {
             ? [dirFn(schema.transactions.invoiceNumber), desc(schema.transactions.issuedAt)]
             : [dirFn(schema.transactions.issuedAt), dirFn(schema.transactions.createdAt)]
 
-    const allTotals = this.db
+    const aggRow = this.db
       .select({
-        preTaxAmount: schema.transactions.preTaxAmount,
-        vatAmount: schema.transactions.vatAmount,
-        totalAmount: schema.transactions.totalAmount,
-        convertedTotalVnd: schema.transactions.convertedTotalVnd
+        cnt: sql<number>`count(*)`,
+        preTaxSum: sql<number>`coalesce(sum(round(${schema.transactions.preTaxAmount} * cast(coalesce(nullif(${schema.transactions.fxRateDecimal}, ''), '1') as real))), 0)`,
+        vatSum: sql<number>`coalesce(sum(round(${schema.transactions.vatAmount} * cast(coalesce(nullif(${schema.transactions.fxRateDecimal}, ''), '1') as real))), 0)`,
+        totalSum: sql<number>`coalesce(sum(coalesce(${schema.transactions.convertedTotalVnd}, ${schema.transactions.totalAmount})), 0)`
       })
       .from(schema.transactions)
       .where(whereClause)
-      .all()
+      .get()
 
-    const total = allTotals.length
-    let preTaxSum = 0
-    let vatSum = 0
-    let totalSum = 0
-    for (const r of allTotals) {
-      preTaxSum += r.preTaxAmount
-      vatSum += r.vatAmount
-      totalSum += r.convertedTotalVnd ?? r.totalAmount
-    }
+    const total = Number(aggRow?.cnt ?? 0)
+    const preTaxSum = Number(aggRow?.preTaxSum ?? 0)
+    const vatSum = Number(aggRow?.vatSum ?? 0)
+    const totalSum = Number(aggRow?.totalSum ?? 0)
 
     const offset = filters.offset ?? 0
     const limit = filters.limit ?? 500
@@ -1282,18 +1363,27 @@ export class TTaxService {
     const id = randomUUID()
     const baseCur = ws?.baseCurrency || "VND"
     const cur = (input.currencyCode || baseCur).toUpperCase()
-    const total = Math.round(input.totalAmount || input.preTaxAmount + input.vatAmount)
+    const rawPreTax = Math.round(input.preTaxAmount || 0)
+    const rawVat = Math.round(input.vatAmount || 0)
+    const total = Math.round(input.totalAmount || rawPreTax + rawVat)
     const issuedAt = input.issuedAt ?? new Date().toISOString().slice(0, 10)
+    this.assertNotLocked(ws?.lockDate, issuedAt)
 
     let fxRate = input.fxRateDecimal || "1"
+    let convertedPreTaxVnd = rawPreTax
+    let convertedVatVnd = rawVat
     let convertedTotalVnd = total
     if (cur !== baseCur) {
       if (input.fxRateDecimal && Number(input.fxRateDecimal) > 0) {
+        convertedPreTaxVnd = convertAmount(rawPreTax, input.fxRateDecimal, baseCur)
+        convertedVatVnd = convertAmount(rawVat, input.fxRateDecimal, baseCur)
         convertedTotalVnd = convertAmount(total, input.fxRateDecimal, baseCur)
       } else {
         try {
           const fx = await getHistoricalExchangeRate(cur, baseCur, issuedAt, this.createFxCacheAdapter())
           fxRate = fx.rate
+          convertedPreTaxVnd = convertAmount(rawPreTax, fxRate, baseCur)
+          convertedVatVnd = convertAmount(rawVat, fxRate, baseCur)
           convertedTotalVnd = convertAmount(total, fxRate, baseCur)
         } catch {
           convertedTotalVnd = total
@@ -1311,8 +1401,8 @@ export class TTaxService {
           merchantTaxCode: input.merchantTaxCode ?? null,
           direction: input.direction,
           type: input.direction === "output" ? "income" : "expense",
-          preTaxAmount: Math.round(input.preTaxAmount || 0),
-          vatAmount: Math.round(input.vatAmount || 0),
+          preTaxAmount: rawPreTax,
+          vatAmount: rawVat,
           totalAmount: total,
           currencyCode: cur,
           fxRateDecimal: fxRate,
@@ -1341,8 +1431,8 @@ export class TTaxService {
           categoryCode: input.categoryCode,
           paymentMethod: input.paymentMethod,
           paymentStatus: input.paymentStatus ?? "paid",
-          preTaxAmount: Math.round(input.preTaxAmount || 0),
-          vatAmount: Math.round(input.vatAmount || 0),
+          preTaxAmount: convertedPreTaxVnd,
+          vatAmount: convertedVatVnd,
           totalAmount: convertedTotalVnd,
           merchant: input.merchant,
           merchantTaxCode: input.merchantTaxCode,
@@ -1362,8 +1452,26 @@ export class TTaxService {
     opts: { repostJournal?: boolean } = { repostJournal: true }
   ) {
     this.db.transaction((tx) => {
+      const ws = tx.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+      const existing = tx
+        .select()
+        .from(schema.transactions)
+        .where(and(eq(schema.transactions.id, id), eq(schema.transactions.workspaceId, workspaceId)))
+        .get()
+      if (!existing) return
+      this.assertNotLocked(ws?.lockDate, patch.issuedAt ?? existing.issuedAt)
+
+      const nextPatch: Partial<typeof schema.transactions.$inferInsert> = { ...patch, updatedAt: new Date().toISOString() }
+      const baseCur = ws?.baseCurrency || "VND"
+      const cur = (patch.currencyCode ?? existing.currencyCode ?? baseCur).toUpperCase()
+      const fx = patch.fxRateDecimal ?? existing.fxRateDecimal ?? "1"
+      if (patch.totalAmount !== undefined || patch.fxRateDecimal !== undefined || patch.currencyCode !== undefined) {
+        const rawTotal = patch.totalAmount ?? existing.totalAmount
+        nextPatch.convertedTotalVnd = cur !== baseCur ? convertAmount(rawTotal, fx, baseCur) : rawTotal
+      }
+
       tx.update(schema.transactions)
-        .set({ ...patch, updatedAt: new Date().toISOString() })
+        .set(nextPatch)
         .where(and(eq(schema.transactions.id, id), eq(schema.transactions.workspaceId, workspaceId)))
         .run()
 
@@ -1372,21 +1480,20 @@ export class TTaxService {
         (patch.preTaxAmount !== undefined ||
           patch.vatAmount !== undefined ||
           patch.totalAmount !== undefined ||
+          patch.fxRateDecimal !== undefined ||
           patch.categoryCode !== undefined ||
           patch.paymentMethod !== undefined ||
           patch.paymentStatus !== undefined ||
           patch.direction !== undefined ||
           patch.issuedAt !== undefined)
 
-      if (shouldRepost) {
-        const ws = tx.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+      if (shouldRepost && ws) {
         const curr = tx
           .select()
           .from(schema.transactions)
           .where(and(eq(schema.transactions.id, id), eq(schema.transactions.workspaceId, workspaceId)))
           .get()
-        if (ws && curr) {
-          // Replace auto-posted journal entry cleanly to keep VAS ledger in sync
+        if (curr) {
           tx.delete(schema.journalEntries)
             .where(
               and(
@@ -1397,6 +1504,12 @@ export class TTaxService {
             )
             .run()
 
+          const rate = curr.fxRateDecimal || "1"
+          const isFx = (curr.currencyCode || baseCur).toUpperCase() !== baseCur
+          const preTaxVnd = isFx ? convertAmount(curr.preTaxAmount, rate, baseCur) : curr.preTaxAmount
+          const vatVnd = isFx ? convertAmount(curr.vatAmount, rate, baseCur) : curr.vatAmount
+          const totalVnd = curr.convertedTotalVnd ?? (isFx ? convertAmount(curr.totalAmount, rate, baseCur) : curr.totalAmount)
+
           this.postAutoJournalInTx(tx, {
             workspaceId,
             regime: ws.accountingRegime as AccountingRegime,
@@ -1406,9 +1519,9 @@ export class TTaxService {
             categoryCode: curr.categoryCode,
             paymentMethod: curr.paymentMethod,
             paymentStatus: curr.paymentStatus,
-            preTaxAmount: curr.preTaxAmount,
-            vatAmount: curr.vatAmount,
-            totalAmount: curr.convertedTotalVnd ?? curr.totalAmount,
+            preTaxAmount: preTaxVnd,
+            vatAmount: vatVnd,
+            totalAmount: totalVnd,
             merchant: curr.merchant,
             merchantTaxCode: curr.merchantTaxCode,
             invoiceNumber: curr.invoiceNumber,
@@ -1426,20 +1539,113 @@ export class TTaxService {
     patch: Partial<Pick<typeof schema.transactions.$inferInsert, "categoryCode" | "projectCode" | "paymentStatus">>
   ) {
     if (!ids.length) return 0
-    this.db
-      .update(schema.transactions)
-      .set({ ...patch, updatedAt: new Date().toISOString() })
-      .where(and(eq(schema.transactions.workspaceId, workspaceId), inArray(schema.transactions.id, ids)))
-      .run()
+    this.db.transaction((tx) => {
+      const ws = tx.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+      const targetRows = tx
+        .select()
+        .from(schema.transactions)
+        .where(and(eq(schema.transactions.workspaceId, workspaceId), inArray(schema.transactions.id, ids)))
+        .all()
+      for (const r of targetRows) {
+        this.assertNotLocked(ws?.lockDate, r.issuedAt)
+      }
+
+      tx.update(schema.transactions)
+        .set({ ...patch, updatedAt: new Date().toISOString() })
+        .where(and(eq(schema.transactions.workspaceId, workspaceId), inArray(schema.transactions.id, ids)))
+        .run()
+
+      if (ws && (patch.categoryCode !== undefined || patch.paymentStatus !== undefined)) {
+        const baseCur = ws.baseCurrency || "VND"
+        const updatedRows = tx
+          .select()
+          .from(schema.transactions)
+          .where(and(eq(schema.transactions.workspaceId, workspaceId), inArray(schema.transactions.id, ids)))
+          .all()
+
+        tx.delete(schema.journalEntries)
+          .where(
+            and(
+              eq(schema.journalEntries.workspaceId, workspaceId),
+              inArray(schema.journalEntries.transactionId, ids),
+              eq(schema.journalEntries.postedBy, "auto_rule")
+            )
+          )
+          .run()
+
+        for (const curr of updatedRows) {
+          const rate = curr.fxRateDecimal || "1"
+          const isFx = (curr.currencyCode || baseCur).toUpperCase() !== baseCur
+          this.postAutoJournalInTx(tx, {
+            workspaceId,
+            regime: ws.accountingRegime as AccountingRegime,
+            transactionId: curr.id,
+            name: curr.name || "Chứng từ",
+            direction: (curr.direction as TransactionDirection) || "input",
+            categoryCode: curr.categoryCode,
+            paymentMethod: curr.paymentMethod,
+            paymentStatus: curr.paymentStatus,
+            preTaxAmount: isFx ? convertAmount(curr.preTaxAmount, rate, baseCur) : curr.preTaxAmount,
+            vatAmount: isFx ? convertAmount(curr.vatAmount, rate, baseCur) : curr.vatAmount,
+            totalAmount: curr.convertedTotalVnd ?? curr.totalAmount,
+            merchant: curr.merchant,
+            merchantTaxCode: curr.merchantTaxCode,
+            invoiceNumber: curr.invoiceNumber,
+            voucherDate: curr.issuedAt ?? new Date().toISOString().slice(0, 10)
+          })
+        }
+      }
+    })
     return ids.length
   }
 
-  deleteTransactions(workspaceId: string, ids: string[]) {
+  deleteTransactions(workspaceId: string, ids: string[], opts: { restoreFilesToInbox?: boolean } = {}) {
     if (!ids.length) return 0
-    this.db
-      .delete(schema.transactions)
-      .where(and(eq(schema.transactions.workspaceId, workspaceId), inArray(schema.transactions.id, ids)))
-      .run()
+    this.db.transaction((tx) => {
+      const ws = tx.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+      const rows = tx
+        .select()
+        .from(schema.transactions)
+        .where(and(eq(schema.transactions.workspaceId, workspaceId), inArray(schema.transactions.id, ids)))
+        .all()
+      for (const r of rows) {
+        this.assertNotLocked(ws?.lockDate, r.issuedAt)
+      }
+
+      // Reset linked bank statements back to unmatched instead of leaving orphaned status='matched'
+      tx.update(schema.bankStatements)
+        .set({ matchedTransactionId: null, matchStatus: "unmatched", matchConfidence: null })
+        .where(and(eq(schema.bankStatements.workspaceId, workspaceId), inArray(schema.bankStatements.matchedTransactionId, ids)))
+        .run()
+
+      // Clear einvoice_records so deleted XML invoices can be cleanly re-ingested/re-approved without false duplicate block
+      tx.delete(schema.einvoiceRecords)
+        .where(and(eq(schema.einvoiceRecords.workspaceId, workspaceId), inArray(schema.einvoiceRecords.transactionId, ids)))
+        .run()
+
+      // Optionally return primary files back to inbox when deleting accidental approvals
+      if (opts.restoreFilesToInbox !== false) {
+        const primaryFileIds: string[] = []
+        for (const r of rows) {
+          try {
+            const arr = JSON.parse(r.filesJson || "[]") as string[]
+            if (arr[0]) primaryFileIds.push(arr[0])
+          } catch {
+            // ignore
+          }
+        }
+        if (primaryFileIds.length > 0) {
+          tx.update(schema.files)
+            .set({ isReviewed: false })
+            .where(and(eq(schema.files.workspaceId, workspaceId), inArray(schema.files.id, primaryFileIds)))
+            .run()
+        }
+      }
+
+      tx.delete(schema.transactions)
+        .where(and(eq(schema.transactions.workspaceId, workspaceId), inArray(schema.transactions.id, ids)))
+        .run()
+    })
     return ids.length
   }
 
@@ -1462,8 +1668,8 @@ export class TTaxService {
           COUNT(*) AS tx_count,
           COALESCE(SUM(CASE WHEN direction = 'output' THEN COALESCE(converted_total_vnd, total_amount) ELSE 0 END), 0) AS total_rev,
           COALESCE(SUM(CASE WHEN direction != 'output' THEN COALESCE(converted_total_vnd, total_amount) ELSE 0 END), 0) AS total_exp,
-          COALESCE(SUM(CASE WHEN direction = 'output' THEN vat_amount ELSE 0 END), 0) AS out_vat,
-          COALESCE(SUM(CASE WHEN direction != 'output' THEN vat_amount ELSE 0 END), 0) AS in_vat,
+          COALESCE(SUM(CASE WHEN direction = 'output' THEN ROUND(vat_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS out_vat,
+          COALESCE(SUM(CASE WHEN direction != 'output' THEN ROUND(vat_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS in_vat,
           COALESCE(SUM(CASE WHEN compliance_status IN ('warning', 'error') THEN 1 ELSE 0 END), 0) AS warnings
         FROM transactions WHERE ${whereSql}`
       )
@@ -1482,8 +1688,8 @@ export class TTaxService {
           substr(coalesce(issued_at, created_at), 1, 7) AS period,
           COALESCE(SUM(CASE WHEN direction = 'output' THEN COALESCE(converted_total_vnd, total_amount) ELSE 0 END), 0) AS revenue,
           COALESCE(SUM(CASE WHEN direction != 'output' THEN COALESCE(converted_total_vnd, total_amount) ELSE 0 END), 0) AS expense,
-          COALESCE(SUM(CASE WHEN direction = 'output' THEN vat_amount ELSE 0 END), 0) AS vatOut,
-          COALESCE(SUM(CASE WHEN direction != 'output' THEN vat_amount ELSE 0 END), 0) AS vatIn
+          COALESCE(SUM(CASE WHEN direction = 'output' THEN ROUND(vat_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS vatOut,
+          COALESCE(SUM(CASE WHEN direction != 'output' THEN ROUND(vat_amount * CAST(COALESCE(NULLIF(fx_rate_decimal, ''), '1') AS REAL)) ELSE 0 END), 0) AS vatIn
         FROM transactions WHERE ${whereSql}
         GROUP BY period
         ORDER BY period ASC`
@@ -1578,11 +1784,245 @@ export class TTaxService {
   }
 
   updateJournalLine(lineId: string, patch: { debitAccount?: string; creditAccount?: string; amountVnd?: number; description?: string }) {
+    const row = this.sqlite
+      .prepare(
+        `SELECT je.workspace_id AS workspaceId, je.voucher_date AS voucherDate, w.lock_date AS lockDate
+         FROM journal_lines jl
+         JOIN journal_entries je ON jl.entry_id = je.id
+         JOIN workspaces w ON je.workspace_id = w.id
+         WHERE jl.id = ?`
+      )
+      .get(lineId) as { workspaceId: string; voucherDate: string; lockDate: string | null } | undefined
+    if (row) this.assertNotLocked(row.lockDate, row.voucherDate)
     this.db.update(schema.journalLines).set(patch).where(eq(schema.journalLines.id, lineId)).run()
   }
 
+  createManualJournalEntry(
+    workspaceId: string,
+    input: {
+      voucherNo?: string
+      voucherDate: string
+      description: string
+      lines: Array<{ debitAccount: string; creditAccount: string; amountVnd: number; description?: string }>
+    }
+  ) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) throw new Error("Workspace không tồn tại.")
+    this.assertNotLocked(ws.lockDate, input.voucherDate)
+    if (!input.lines.length) throw new Error("Cần ít nhất 1 dòng định khoản.")
+
+    const jeId = randomUUID()
+    const voucherNo = (input.voucherNo?.trim() || `PKT-${jeId.slice(0, 6).toUpperCase()}`).slice(0, 32)
+    this.db.transaction((tx) => {
+      tx.insert(schema.journalEntries)
+        .values({
+          id: jeId,
+          workspaceId,
+          transactionId: null,
+          voucherNo,
+          voucherDate: input.voucherDate,
+          description: input.description.trim() || "Phiếu kế toán thủ công",
+          status: "posted",
+          postedBy: "manual"
+        })
+        .run()
+      for (const ln of input.lines) {
+        const amt = Math.max(0, Math.round(Number(ln.amountVnd) || 0))
+        if (!ln.debitAccount || !ln.creditAccount || amt <= 0) {
+          throw new Error("Tài khoản Nợ, Tài khoản Có và Số tiền > 0 là bắt buộc.")
+        }
+        tx.insert(schema.journalLines)
+          .values({
+            id: randomUUID(),
+            entryId: jeId,
+            debitAccount: ln.debitAccount.trim(),
+            creditAccount: ln.creditAccount.trim(),
+            amountVnd: amt,
+            description: ln.description ?? input.description
+          })
+          .run()
+      }
+    })
+    return { id: jeId, voucherNo }
+  }
+
+  postVatClosingEntry(workspaceId: string, input: { dateFrom?: string; dateTo?: string; voucherDate: string }) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) throw new Error("Workspace không tồn tại.")
+    this.assertNotLocked(ws.lockDate, input.voucherDate)
+
+    const conds = ["je.workspace_id = ?"]
+    const params: unknown[] = [workspaceId]
+    if (input.dateFrom) {
+      conds.push("je.voucher_date >= ?")
+      params.push(input.dateFrom)
+    }
+    if (input.dateTo) {
+      conds.push("je.voucher_date <= ?")
+      params.push(input.dateTo)
+    }
+    const whereSql = conds.join(" AND ")
+
+    const vatRow = this.sqlite
+      .prepare(
+        `SELECT
+          COALESCE(SUM(CASE WHEN jl.debit_account = '1331' THEN jl.amount_vnd ELSE 0 END), 0) -
+          COALESCE(SUM(CASE WHEN jl.credit_account = '1331' THEN jl.amount_vnd ELSE 0 END), 0) AS inVatNet,
+          COALESCE(SUM(CASE WHEN jl.credit_account = '33311' THEN jl.amount_vnd ELSE 0 END), 0) -
+          COALESCE(SUM(CASE WHEN jl.debit_account = '33311' THEN jl.amount_vnd ELSE 0 END), 0) AS outVatNet
+        FROM journal_lines jl
+        JOIN journal_entries je ON jl.entry_id = je.id
+        WHERE ${whereSql}`
+      )
+      .get(...params) as { inVatNet: number; outVatNet: number }
+
+    const deductible = Math.max(0, Math.min(Number(vatRow?.inVatNet ?? 0), Number(vatRow?.outVatNet ?? 0)))
+    if (deductible <= 0) {
+      return { posted: false, amountVnd: 0, message: "Không có số dư thuế GTGT đủ điều kiện khấu trừ kết chuyển trong kỳ." }
+    }
+
+    const res = this.createManualJournalEntry(workspaceId, {
+      voucherNo: `KC-VAT-${input.voucherDate.slice(0, 7).replace("-", "")}`,
+      voucherDate: input.voucherDate,
+      description: `Kết chuyển khấu trừ thuế GTGT kỳ đến ${input.voucherDate}`,
+      lines: [
+        {
+          debitAccount: "33311",
+          creditAccount: "1331",
+          amountVnd: deductible,
+          description: "Khấu trừ thuế GTGT đầu vào sang đầu ra"
+        }
+      ]
+    })
+    return { posted: true, amountVnd: deductible, entryId: res.id, voucherNo: res.voucherNo }
+  }
+
+  getTrialBalance(workspaceId: string, opts: { dateFrom?: string; dateTo?: string } = {}) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) return []
+    const accounts = this.listAccounts(workspaceId, ws.accountingRegime as AccountingRegime)
+    const accMap = new Map(
+      accounts.map((a) => [
+        a.code,
+        {
+          code: a.code,
+          name: a.name,
+          nature: a.nature,
+          openingDebit: 0,
+          openingCredit: 0,
+          periodDebit: 0,
+          periodCredit: 0,
+          closingDebit: 0,
+          closingCredit: 0
+        }
+      ])
+    )
+
+    const getOrCreate = (code: string) => {
+      let row = accMap.get(code)
+      if (!row) {
+        row = {
+          code,
+          name: `Tài khoản ${code}`,
+          nature: "dual",
+          openingDebit: 0,
+          openingCredit: 0,
+          periodDebit: 0,
+          periodCredit: 0,
+          closingDebit: 0,
+          closingCredit: 0
+        }
+        accMap.set(code, row)
+      }
+      return row
+    }
+
+    const rows = this.sqlite
+      .prepare(
+        `SELECT je.voucher_date AS voucherDate, jl.debit_account AS debitAccount, jl.credit_account AS creditAccount, jl.amount_vnd AS amountVnd
+         FROM journal_lines jl
+         JOIN journal_entries je ON jl.entry_id = je.id
+         WHERE je.workspace_id = ?`
+      )
+      .all(workspaceId) as Array<{ voucherDate: string; debitAccount: string; creditAccount: string; amountVnd: number }>
+
+    for (const r of rows) {
+      if (opts.dateTo && r.voucherDate > opts.dateTo) continue
+      const amt = Number(r.amountVnd ?? 0)
+      const isOpening = Boolean(opts.dateFrom && r.voucherDate < opts.dateFrom)
+      const dr = getOrCreate(r.debitAccount)
+      const cr = getOrCreate(r.creditAccount)
+      if (isOpening) {
+        dr.openingDebit += amt
+        cr.openingCredit += amt
+      } else {
+        dr.periodDebit += amt
+        cr.periodCredit += amt
+      }
+    }
+
+    const out = []
+    for (const row of accMap.values()) {
+      const openNet = row.openingDebit - row.openingCredit
+      row.openingDebit = openNet > 0 ? openNet : 0
+      row.openingCredit = openNet < 0 ? Math.abs(openNet) : 0
+
+      const closeNet = openNet + row.periodDebit - row.periodCredit
+      row.closingDebit = closeNet > 0 ? closeNet : 0
+      row.closingCredit = closeNet < 0 ? Math.abs(closeNet) : 0
+
+      if (row.openingDebit || row.openingCredit || row.periodDebit || row.periodCredit || row.closingDebit || row.closingCredit) {
+        out.push(row)
+      }
+    }
+    return out.sort((a, b) => a.code.localeCompare(b.code))
+  }
+
   listCounterparties(workspaceId: string) {
-    return this.db.select().from(schema.counterparties).where(eq(schema.counterparties.workspaceId, workspaceId)).all()
+    const cps = this.db.select().from(schema.counterparties).where(eq(schema.counterparties.workspaceId, workspaceId)).all()
+    const stats = this.sqlite
+      .prepare(
+        `SELECT merchant_tax_code AS taxCode, COUNT(*) AS txCount, COALESCE(SUM(COALESCE(converted_total_vnd, total_amount)), 0) AS totalAmountVnd
+         FROM transactions WHERE workspace_id = ? AND merchant_tax_code IS NOT NULL AND merchant_tax_code != ''
+         GROUP BY merchant_tax_code`
+      )
+      .all(workspaceId) as Array<{ taxCode: string; txCount: number; totalAmountVnd: number }>
+    const statMap = new Map(stats.map((s) => [s.taxCode, s]))
+    return cps.map((cp) => {
+      const s = statMap.get(cp.taxCode)
+      return {
+        ...cp,
+        txCount: Number(s?.txCount ?? 0),
+        totalAmountVnd: Number(s?.totalAmountVnd ?? 0)
+      }
+    })
+  }
+
+  updateCounterparty(
+    workspaceId: string,
+    id: string,
+    patch: { defaultCategoryCode?: string | null; defaultAccountCode?: string | null; riskNotes?: string | null }
+  ) {
+    this.db
+      .update(schema.counterparties)
+      .set(patch)
+      .where(and(eq(schema.counterparties.id, id), eq(schema.counterparties.workspaceId, workspaceId)))
+      .run()
+    return this.listCounterparties(workspaceId)
+  }
+
+  async batchRefreshCounterparties(workspaceId: string) {
+    const cps = this.db
+      .select()
+      .from(schema.counterparties)
+      .where(and(eq(schema.counterparties.workspaceId, workspaceId), eq(schema.counterparties.status, "unknown")))
+      .all()
+    let updated = 0
+    for (const cp of cps.slice(0, 20)) {
+      const res = await this.refreshCounterpartyRisk(workspaceId, cp.taxCode).catch(() => null)
+      if (res?.found) updated++
+    }
+    return { checked: Math.min(cps.length, 20), updated }
   }
 
   async refreshCounterpartyRisk(workspaceId: string, taxCode: string) {
@@ -1735,6 +2175,63 @@ export class TTaxService {
       .set({ matchedTransactionId: null, matchStatus: "unmatched", matchConfidence: null })
       .where(and(eq(schema.bankStatements.id, statementId), eq(schema.bankStatements.workspaceId, workspaceId)))
       .run()
+  }
+
+  async quickPostBankStatement(
+    workspaceId: string,
+    statementId: string,
+    input: { kind: "bank_fee" | "interest" | "custom"; name?: string; categoryCode?: string }
+  ) {
+    const stmt = this.db
+      .select()
+      .from(schema.bankStatements)
+      .where(and(eq(schema.bankStatements.id, statementId), eq(schema.bankStatements.workspaceId, workspaceId)))
+      .get()
+    if (!stmt) throw new Error("Không tìm thấy dòng sao kê.")
+
+    const isDebit = stmt.debitAmount > 0
+    const amt = Math.max(stmt.debitAmount, stmt.creditAmount)
+    const defaultName =
+      input.name?.trim() ||
+      (input.kind === "bank_fee"
+        ? `Phí dịch vụ ngân hàng ${stmt.bankCode}`
+        : input.kind === "interest"
+          ? `Lãi tiền gửi ngân hàng ${stmt.bankCode}`
+          : stmt.description.slice(0, 80))
+    const categoryCode =
+      input.categoryCode || (input.kind === "bank_fee" ? "fees" : input.kind === "interest" ? "other" : "other")
+
+    const tx = await this.createManualTransaction(workspaceId, {
+      name: defaultName,
+      merchant: `Ngân hàng ${stmt.bankCode}`,
+      direction: isDebit ? "input" : "output",
+      preTaxAmount: amt,
+      vatAmount: 0,
+      totalAmount: amt,
+      categoryCode,
+      issuedAt: stmt.txDate,
+      paymentMethod: "Chuyển khoản",
+      paymentStatus: "paid",
+      note: stmt.description
+    })
+
+    // For interest income, re-map credit revenue to 515 (Doanh thu tài chính) under enterprise regimes
+    if (input.kind === "interest") {
+      const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+      if (ws && ws.accountingRegime !== "HKD_2026") {
+        const entry = this.db
+          .select()
+          .from(schema.journalEntries)
+          .where(and(eq(schema.journalEntries.workspaceId, workspaceId), eq(schema.journalEntries.transactionId, tx.id)))
+          .get()
+        if (entry) {
+          this.db.update(schema.journalLines).set({ creditAccount: "515" }).where(eq(schema.journalLines.entryId, entry.id)).run()
+        }
+      }
+    }
+
+    this.confirmBankMatch(workspaceId, statementId, tx.id)
+    return tx
   }
 
   getAppData<T = Record<string, unknown>>(workspaceId: string, app: string): T {

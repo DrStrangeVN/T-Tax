@@ -11,6 +11,7 @@ import type {
   OutgoingInvoiceTemplateData,
   ParsedEInvoice,
   TransactionDirection,
+  TrialBalanceRow,
   WorkspaceBadgeCounts,
   WorkspaceDTO,
   XmlSignatureVerification
@@ -51,6 +52,7 @@ export interface TTaxTransport {
 
   // Workspaces
   listWorkspaces: () => Promise<WorkspaceDTO[]>
+  setActiveWorkspace?: (workspaceId: string) => Promise<void>
   createWorkspace: (input: {
     name: string
     taxCode: string
@@ -105,6 +107,7 @@ export interface TTaxTransport {
 
   // Batch Converter
   batchProcessXml: (workspaceId: string, files: IngestFilePayload[], saveToLedger: boolean) => Promise<BatchXmlResultItem[]>
+  renderParsedXmlHtml: (parsed: ParsedEInvoice, signature?: XmlSignatureVerification) => Promise<string>
   savePdfFromHtml: (defaultFilename: string, html: string) => Promise<{ savedPath?: string; canceled?: boolean }>
   saveBatchPdfsFromHtml: (items: Array<{ filename: string; html: string }>) => Promise<{ folderPath?: string; count: number; canceled?: boolean }>
 
@@ -118,7 +121,8 @@ export interface TTaxTransport {
   createTransaction: (workspaceId: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>
   updateTransaction: (workspaceId: string, id: string, patch: Record<string, unknown>, repostJournal?: boolean) => Promise<Record<string, unknown>>
   bulkUpdateTransactions: (workspaceId: string, ids: string[], patch: Record<string, unknown>) => Promise<number>
-  deleteTransactions: (workspaceId: string, ids: string[]) => Promise<number>
+  deleteTransactions: (workspaceId: string, ids: string[], opts?: { restoreFilesToInbox?: boolean }) => Promise<number>
+  reopenTransactionToInbox: (workspaceId: string, txId: string) => Promise<{ restoredFileIds: string[] }>
   getDashboardStats: (workspaceId: string, dateFrom?: string, dateTo?: string) => Promise<Record<string, unknown>>
   getSidebarBadgeCounts: (workspaceId: string) => Promise<WorkspaceBadgeCounts>
   searchGlobal: (workspaceId: string, query: string) => Promise<{
@@ -130,12 +134,37 @@ export interface TTaxTransport {
   // Accounting, Counterparties & Bank
   listJournalEntries: (workspaceId: string, opts?: { dateFrom?: string; dateTo?: string; limit?: number }) => Promise<Array<Record<string, unknown>>>
   updateJournalLine: (lineId: string, patch: Record<string, unknown>) => Promise<void>
+  createManualJournalEntry: (
+    workspaceId: string,
+    input: {
+      voucherNo?: string
+      voucherDate: string
+      description: string
+      lines: Array<{ debitAccount: string; creditAccount: string; amountVnd: number; description?: string }>
+    }
+  ) => Promise<{ id: string; voucherNo: string }>
+  postVatClosingEntry: (
+    workspaceId: string,
+    input: { dateFrom?: string; dateTo?: string; voucherDate: string }
+  ) => Promise<{ posted: boolean; amountVnd: number; voucherNo?: string; message?: string }>
+  getTrialBalance: (workspaceId: string, opts?: { dateFrom?: string; dateTo?: string }) => Promise<TrialBalanceRow[]>
   listCounterparties: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
+  updateCounterparty: (
+    workspaceId: string,
+    id: string,
+    patch: { defaultCategoryCode?: string | null; defaultAccountCode?: string | null; riskNotes?: string | null }
+  ) => Promise<Array<Record<string, unknown>>>
+  batchRefreshCounterparties: (workspaceId: string) => Promise<{ checked: number; updated: number }>
   refreshCounterpartyRisk: (workspaceId: string, taxCode: string) => Promise<Record<string, unknown>>
   importBankStatement: (workspaceId: string, filename: string, base64: string, bankCode: string) => Promise<Record<string, unknown>>
   listBankStatements: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
   confirmBankMatch: (workspaceId: string, statementId: string, transactionId: string) => Promise<void>
   unmatchBankStatement: (workspaceId: string, statementId: string) => Promise<void>
+  quickPostBankStatement: (
+    workspaceId: string,
+    statementId: string,
+    input: { kind: "bank_fee" | "interest" | "custom"; name?: string; categoryCode?: string }
+  ) => Promise<Record<string, unknown>>
 
   // Mini-Apps & Import/Export/Backup
   getAppData: (workspaceId: string, app: string) => Promise<Record<string, unknown>>
@@ -288,6 +317,7 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     splitFileItems: (wsId, fileId, items, meta) => post("/rpc", { method: "splitFileItems", args: [wsId, fileId, items, meta] }),
     deleteFile: (wsId, fileId) => post("/rpc", { method: "deleteFile", args: [wsId, fileId] }),
     batchProcessXml: (wsId, files, save) => post("/rpc", { method: "batchProcessXml", args: [wsId, files, save] }),
+    renderParsedXmlHtml: (parsed, sig) => post("/rpc", { method: "renderParsedXmlHtml", args: [parsed, sig] }),
     savePdfFromHtml: async (filename, html) => {
       const w = window.open("", "_blank")
       if (w) {
@@ -321,19 +351,26 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     createTransaction: (wsId, input) => post("/rpc", { method: "createTransaction", args: [wsId, input] }),
     updateTransaction: (wsId, id, patch, repost) => post("/rpc", { method: "updateTransaction", args: [wsId, id, patch, repost] }),
     bulkUpdateTransactions: (wsId, ids, patch) => post("/rpc", { method: "bulkUpdateTransactions", args: [wsId, ids, patch] }),
-    deleteTransactions: (wsId, ids) => post("/rpc", { method: "deleteTransactions", args: [wsId, ids] }),
+    deleteTransactions: (wsId, ids, opts) => post("/rpc", { method: "deleteTransactions", args: [wsId, ids, opts] }),
+    reopenTransactionToInbox: (wsId, txId) => post("/rpc", { method: "reopenTransactionToInbox", args: [wsId, txId] }),
     getDashboardStats: (wsId, from, to) => post("/rpc", { method: "getDashboardStats", args: [wsId, from, to] }),
     getSidebarBadgeCounts: (wsId) => post("/rpc", { method: "getSidebarBadgeCounts", args: [wsId] }),
     searchGlobal: (wsId, q) => post("/rpc", { method: "searchGlobal", args: [wsId, q] }),
     lookupFxRate: (wsId, from, to, date) => post("/rpc", { method: "lookupFxRate", args: [wsId, from, to, date] }),
     listJournalEntries: (wsId, opts) => post("/rpc", { method: "listJournalEntries", args: [wsId, opts] }),
     updateJournalLine: (id, patch) => post("/rpc", { method: "updateJournalLine", args: [id, patch] }),
+    createManualJournalEntry: (wsId, inp) => post("/rpc", { method: "createManualJournalEntry", args: [wsId, inp] }),
+    postVatClosingEntry: (wsId, inp) => post("/rpc", { method: "postVatClosingEntry", args: [wsId, inp] }),
+    getTrialBalance: (wsId, opts) => post("/rpc", { method: "getTrialBalance", args: [wsId, opts] }),
     listCounterparties: (wsId) => post("/rpc", { method: "listCounterparties", args: [wsId] }),
+    updateCounterparty: (wsId, id, patch) => post("/rpc", { method: "updateCounterparty", args: [wsId, id, patch] }),
+    batchRefreshCounterparties: (wsId) => post("/rpc", { method: "batchRefreshCounterparties", args: [wsId] }),
     refreshCounterpartyRisk: (wsId, mst) => post("/rpc", { method: "refreshCounterpartyRisk", args: [wsId, mst] }),
     importBankStatement: (wsId, fname, b64, code) => post("/rpc", { method: "importBankStatement", args: [wsId, fname, b64, code] }),
     listBankStatements: (wsId) => post("/rpc", { method: "listBankStatements", args: [wsId] }),
     confirmBankMatch: (wsId, sid, tid) => post("/rpc", { method: "confirmBankMatch", args: [wsId, sid, tid] }),
     unmatchBankStatement: (wsId, sid) => post("/rpc", { method: "unmatchBankStatement", args: [wsId, sid] }),
+    quickPostBankStatement: (wsId, sid, inp) => post("/rpc", { method: "quickPostBankStatement", args: [wsId, sid, inp] }),
     getAppData: (wsId, app) => post("/rpc", { method: "getAppData", args: [wsId, app] }),
     saveAppData: (wsId, app, d) => post("/rpc", { method: "saveAppData", args: [wsId, app, d] }),
     saveEmailServer: (wsId, srv) => post("/rpc", { method: "saveEmailServer", args: [wsId, srv] }),

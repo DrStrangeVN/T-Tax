@@ -48,7 +48,8 @@ export function SettingsPage({
     entityType: workspace.entityType,
     accountingRegime: workspace.accountingRegime,
     baseCurrency: workspace.baseCurrency,
-    address: workspace.address ?? ""
+    address: workspace.address ?? "",
+    lockDate: workspace.lockDate ?? ""
   })
   const [bankForm, setBankForm] = useState<BankDetails>({
     bankBin: workspace.bankDetails?.bankBin || "970436",
@@ -120,7 +121,8 @@ export function SettingsPage({
       entityType: workspace.entityType,
       accountingRegime: workspace.accountingRegime,
       baseCurrency: workspace.baseCurrency,
-      address: workspace.address ?? ""
+      address: workspace.address ?? "",
+      lockDate: workspace.lockDate ?? ""
     })
     setBankForm({
       bankBin: workspace.bankDetails?.bankBin || "970436",
@@ -133,10 +135,11 @@ export function SettingsPage({
   const saveWorkspace = async () => {
     await transport.updateWorkspace(workspace.id, {
       ...wsForm,
+      lockDate: wsForm.lockDate?.trim() || null,
       bankDetails: (bankForm.accountNo ?? "").trim() ? bankForm : null
     })
     onWorkspaceUpdated()
-    onToast("Đã cập nhật thông tin Công ty, Chế độ KT & Tài khoản VietQR.", "ok")
+    onToast("Đã cập nhật thông tin Công ty, Chế độ KT, Khóa sổ & VietQR.", "ok")
   }
 
   const createWorkspace = async (e: React.FormEvent) => {
@@ -271,13 +274,33 @@ export function SettingsPage({
                   ))}
                 </select>
               </div>
-              <div className="sm:col-span-2">
+              <div>
                 <label className="block text-[11px] text-[var(--muted)] mb-1">Địa chỉ</label>
                 <input
                   value={wsForm.address}
                   onChange={(e) => setWsForm({ ...wsForm, address: e.target.value })}
                   className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]"
                 />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--muted)] mb-1">Khóa sổ Kỳ kế toán đến hết ngày (Lock Date)</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={wsForm.lockDate}
+                    onChange={(e) => setWsForm({ ...wsForm, lockDate: e.target.value })}
+                    className="flex-1 h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px] tnum"
+                  />
+                  {wsForm.lockDate && (
+                    <button
+                      type="button"
+                      onClick={() => setWsForm({ ...wsForm, lockDate: "" })}
+                      className="gb shrink-0"
+                    >
+                      Mở khóa
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 

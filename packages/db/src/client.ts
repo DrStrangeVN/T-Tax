@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   base_currency TEXT NOT NULL DEFAULT 'VND',
   address TEXT,
   bank_details_json TEXT,
+  lock_date TEXT,
   logo_path TEXT,
   created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
   updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
@@ -380,6 +381,10 @@ export function openTTaxDatabase(dbPath: string): DatabaseConnection {
   }
   const sqlite = new Database(dbPath)
   sqlite.exec(INIT_SQL)
+  const wsCols = sqlite.prepare("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>
+  if (!wsCols.some((c) => c.name === "lock_date")) {
+    sqlite.exec("ALTER TABLE workspaces ADD COLUMN lock_date TEXT")
+  }
   const db = drizzle(sqlite, { schema })
   seedLegalRules(db)
   return {

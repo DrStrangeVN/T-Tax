@@ -47,6 +47,7 @@ interface LiquidShellProps {
   onCreateWorkspaceRequest: () => void
   unreviewedCount: number
   complianceWarnings: number
+  unmatchedBankCount?: number
   isLight: boolean
   onToggleTheme: () => void
   sidebarMode: SidebarMode
@@ -92,6 +93,7 @@ export function LiquidShell({
   onCreateWorkspaceRequest,
   unreviewedCount,
   complianceWarnings,
+  unmatchedBankCount = 0,
   isLight,
   onToggleTheme,
   sidebarMode,
@@ -240,9 +242,11 @@ export function LiquidShell({
               const badge =
                 item.id === "unsorted" && unreviewedCount > 0
                   ? unreviewedCount
-                  : item.id === "accounting" && complianceWarnings > 0
+                  : item.id === "transactions" && complianceWarnings > 0
                     ? complianceWarnings
-                    : null
+                    : item.id === "accounting" && unmatchedBankCount > 0
+                      ? unmatchedBankCount
+                      : null
               return (
                 <button
                   key={item.id}
@@ -268,7 +272,7 @@ export function LiquidShell({
                       className={`ml-auto text-[10.5px] px-1.5 py-0.2 rounded-full tnum ${
                         isOn
                           ? "text-[var(--cyan)] bg-[var(--cyan-s)]"
-                          : item.id === "accounting"
+                          : item.id === "transactions"
                             ? "text-[var(--amber)] bg-[var(--amber-s)]"
                             : "text-[var(--muted)] bg-[var(--hover)]"
                       }`}

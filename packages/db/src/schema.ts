@@ -11,6 +11,7 @@ export const workspaces = sqliteTable("workspaces", {
   baseCurrency: text("base_currency").notNull().default("VND"),
   address: text("address"),
   bankDetailsJson: text("bank_details_json"),
+  lockDate: text("lock_date"),
   logoPath: text("logo_path"),
   createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
   updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)

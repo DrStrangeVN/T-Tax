@@ -202,4 +202,124 @@ describe("SQLite DB, FTS5, Vault, Excel Export & Backup/Restore", () => {
 
     conn.close()
   })
+
+  it("enforces P0 FX normalization, bulk VAS repost, cascade delete/reopen, trial balance, VAT closing & lockDate", async () => {
+    const conn = openTTaxDatabase(dbPath)
+    const vault = new VaultStorage(vaultDir)
+    const service = new TTaxService(conn.db, conn.sqlite, vault)
+    const ws = service.ensureWorkspace()
+
+    // 1. P0 B1: Foreign currency preTax + vat must post to VAS & dashboard in VND
+    const usdTx = await service.createManualTransaction(ws.id, {
+      name: "SaaS Analytics USD",
+      merchant: "Mixpanel Inc",
+      direction: "input",
+      preTaxAmount: 100,
+      vatAmount: 10,
+      totalAmount: 110,
+      currencyCode: "USD",
+      fxRateDecimal: "25000",
+      categoryCode: "software",
+      issuedAt: "2026-07-05",
+      paymentMethod: "Chuyển khoản"
+    })
+    const usdDetail = service.getTransactionDetail(ws.id, usdTx.id)
+    const totalDebitVnd = (usdDetail?.journalEntries[0]?.lines ?? []).reduce((s, l) => s + l.amountVnd, 0)
+    expect(totalDebitVnd).toBe(2_750_000)
+
+    const dash = service.getDashboardStats(ws.id)
+    expect(dash.totalExpense).toBe(2_750_000)
+    expect(dash.inputVat).toBe(250_000)
+
+    // 2. P0 B3: Bulk category/paymentStatus update reposts auto_rule VAS journal entries
+    service.bulkUpdateTransactions(ws.id, [usdTx.id], { categoryCode: "assets", paymentStatus: "paid" })
+    const reposted = service.getTransactionDetail(ws.id, usdTx.id)
+    expect(reposted?.journalEntries[0]?.lines?.some((l) => l.debitAccount === "211")).toBe(true)
+    expect(reposted?.journalEntries[0]?.lines?.some((l) => l.creditAccount === "1121")).toBe(true)
+
+    // 3. P0 B4 + B2: Companion PDF exclusion & cascade delete / reopen to inbox
+    await service.ingestFiles(ws.id, [
+      { filename: "INV_00000789.xml", mimetype: "application/xml", buffer: Buffer.from(MINIMAL_XML, "utf8") },
+      { filename: "INV_00000789.pdf", mimetype: "application/pdf", buffer: Buffer.from("%PDF-1.4\n%fake\n") }
+    ])
+    const badgesBefore = service.getSidebarBadgeCounts(ws.id)
+    expect(badgesBefore.unreviewedCount).toBe(1)
+
+    const inboxXml = service.listFiles(ws.id, { unreviewedOnly: true }).find((f) => f.filename.endsWith(".xml"))!
+    await service.analyzeFile(ws.id, inboxXml.id, [])
+    await service.batchApproveCleanXml(ws.id, [inboxXml.id])
+    expect(service.getSidebarBadgeCounts(ws.id).unreviewedCount).toBe(0)
+
+    const xmlTxId = service.listTransactions(ws.id, { search: "00000789" }).rows[0]!.id
+    const bk = await service.importBankStatementAndMatch(
+      ws.id,
+      "vcb.csv",
+      Buffer.from("Ngày giao dịch,Nội dung,Ghi nợ,Ghi có\n2026-06-10,TT 00000789,11000000,0\n2026-06-11,PHI CHUYEN KHOAN,22000,0\n", "utf8"),
+      "VCB"
+    )
+    expect(bk.importedCount).toBe(2)
+    const stmts = service.listBankStatements(ws.id)
+    service.confirmBankMatch(ws.id, stmts[0]!.id, xmlTxId)
+
+    // Reopen returns linked XML back to inbox & resets bank match
+    const reopened = service.reopenTransactionToInbox(ws.id, xmlTxId)
+    expect(reopened.restoredFileIds.length).toBeGreaterThanOrEqual(1)
+    expect(service.listTransactions(ws.id, { search: "00000789" }).total).toBe(0)
+    expect(service.listBankStatements(ws.id)[0]?.matchStatus).toBe("unmatched")
+    expect(service.getSidebarBadgeCounts(ws.id).unreviewedCount).toBe(1)
+
+    // Quick-post unmatched bank fee -> TK 6425
+    const feeRes = await service.quickPostBankStatement(ws.id, stmts[1]!.id, { kind: "bank_fee" })
+    expect(feeRes.id).toBeTruthy()
+    expect(service.listBankStatements(ws.id)[1]?.matchStatus).toBe("matched")
+
+    // 4. Trial Balance, Manual Journal, VAT Closing & Counterparty default rule
+    service.createManualJournalEntry(ws.id, {
+      voucherDate: "2026-07-10",
+      description: "Bút toán trích trước chi phí",
+      lines: [{ debitAccount: "6422", creditAccount: "335", amountVnd: 1_500_000 }]
+    })
+    const tb = service.getTrialBalance(ws.id)
+    expect(tb.length).toBeGreaterThan(0)
+    const sumEndingDebit = tb.reduce((s, r) => s + r.closingDebit, 0)
+    const sumEndingCredit = tb.reduce((s, r) => s + r.closingCredit, 0)
+    expect(sumEndingDebit).toBe(sumEndingCredit)
+
+    const vatClose = service.postVatClosingEntry(ws.id, {
+      dateFrom: "2026-07-01",
+      dateTo: "2026-07-31",
+      voucherDate: "2026-07-31"
+    })
+    expect(vatClose).toBeTruthy()
+
+    const cps = service.listCounterparties(ws.id)
+    if (cps.length > 0) {
+      service.updateCounterparty(ws.id, cps[0]!.id, { defaultCategoryCode: "software", defaultAccountCode: "6428" })
+      expect(service.listCounterparties(ws.id)[0]?.defaultAccountCode).toBe("6428")
+    }
+
+    // 5. Accounting Period Lock Guard
+    service.updateWorkspace(ws.id, { lockDate: "2026-06-30" })
+    await expect(
+      service.createManualTransaction(ws.id, {
+        name: "Blocked Backdated Tx",
+        direction: "input",
+        totalAmount: 100_000,
+        issuedAt: "2026-06-15"
+      })
+    ).rejects.toThrow(/khóa/i)
+
+    // 6. P2 Lazy batch XML preview when >10 XML files + on-demand renderParsedXmlHtml
+    const manyXmls = Array.from({ length: 12 }, (_, idx) => ({
+      filename: `XML_${idx + 1}.xml`,
+      buffer: Buffer.from(MINIMAL_XML.replace("00000789", String(1000 + idx)), "utf8")
+    }))
+    const batchRes = await service.batchProcessXmlFiles(ws.id, manyXmls)
+    expect(batchRes).toHaveLength(12)
+    expect(batchRes[0]!.htmlPreview).toBeFalsy()
+    const onDemandHtml = await service.renderParsedXmlHtml(batchRes[0]!.parsed, batchRes[0]!.signature)
+    expect(onDemandHtml).toContain("CÔNG TY CỔ PHẦN CLOUD VIỆT NAM")
+
+    conn.close()
+  })
 })

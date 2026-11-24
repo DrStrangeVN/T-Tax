@@ -57,6 +57,7 @@ export function TTaxApp() {
   const [activePage, setActivePage] = useState<NavPage>("dashboard")
   const [unreviewedCount, setUnreviewedCount] = useState(0)
   const [complianceWarnings, setComplianceWarnings] = useState(0)
+  const [unmatchedBankCount, setUnmatchedBankCount] = useState(0)
 
   const [isLight, setIsLight] = useState(initialPrefs.isLight)
   const [glassIntensity, setGlassIntensity] = useState<GlassIntensity>(initialPrefs.glassIntensity)
@@ -65,7 +66,12 @@ export function TTaxApp() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [cmdOpen, setCmdOpen] = useState(false)
   const [globalDragOver, setGlobalDragOver] = useState(false)
-  const [toast, setToast] = useState<{ msg: string; tone: "ok" | "warn" | "err" } | null>(null)
+  const [toast, setToast] = useState<{
+    id: number
+    msg: string
+    tone: "ok" | "warn" | "err"
+    undo?: { label: string; onClick: () => void | Promise<void> }
+  } | null>(null)
 
   const [txCompliancePreset, setTxCompliancePreset] = useState<string>("")
   const [focusTxId, setFocusTxId] = useState<string | null>(null)
@@ -73,11 +79,22 @@ export function TTaxApp() {
 
   const quickFileInputRef = useRef<HTMLInputElement>(null)
   const dragDepthRef = useRef(0)
+  const userPinnedSidebarRef = useRef(false)
+  const autoRailAppliedRef = useRef(false)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const showToast = useCallback((msg: string, tone: "ok" | "warn" | "err" = "ok") => {
-    setToast({ msg, tone })
-    setTimeout(() => setToast((curr) => (curr?.msg === msg ? null : curr)), 3600)
-  }, [])
+  const showToast = useCallback(
+    (msg: string, tone: "ok" | "warn" | "err" = "ok", undo?: { label: string; onClick: () => void | Promise<void> }) => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+      const id = Date.now()
+      setToast({ id, msg, tone, undo })
+      toastTimerRef.current = setTimeout(
+        () => setToast((curr) => (curr?.id === id ? null : curr)),
+        undo ? 6500 : 3600
+      )
+    },
+    []
+  )
 
   const savePrefsPatch = useCallback((patch: Partial<UiPreferences>) => {
     try {
@@ -91,6 +108,25 @@ export function TTaxApp() {
   useEffect(() => {
     savePrefsPatch({ isLight, glassIntensity, sidebarMode, activeWorkspaceId: activeWsId || undefined })
   }, [isLight, glassIntensity, sidebarMode, activeWsId, savePrefsPatch])
+
+  useEffect(() => {
+    if (activeWsId) {
+      transport.setActiveWorkspace?.(activeWsId).catch(() => {})
+    }
+  }, [activeWsId, transport])
+
+  // Auto Focus Rail (< 1440px) when opening multi-pane invoice/XML workbenches
+  useEffect(() => {
+    if (userPinnedSidebarRef.current || sidebarMode === "collapsed") return
+    const isDenseWorkbench = activePage === "unsorted" || activePage === "converter"
+    if (isDenseWorkbench && window.innerWidth < 1440 && sidebarMode === "expanded") {
+      autoRailAppliedRef.current = true
+      setSidebarMode("rail")
+    } else if (!isDenseWorkbench && autoRailAppliedRef.current) {
+      autoRailAppliedRef.current = false
+      setSidebarMode("expanded")
+    }
+  }, [activePage, sidebarMode])
 
   const loadWorkspaces = useCallback(async () => {
     const list = await transport.listWorkspaces()
@@ -108,6 +144,7 @@ export function TTaxApp() {
       const counts = await transport.getSidebarBadgeCounts(activeWorkspace.id)
       setUnreviewedCount(counts.unreviewedCount ?? 0)
       setComplianceWarnings(counts.complianceWarnings ?? 0)
+      setUnmatchedBankCount(counts.unmatchedBankCount ?? 0)
     } catch {
       // ignore
     }
@@ -280,10 +317,15 @@ export function TTaxApp() {
         }}
         unreviewedCount={unreviewedCount}
         complianceWarnings={complianceWarnings}
+        unmatchedBankCount={unmatchedBankCount}
         isLight={isLight}
         onToggleTheme={() => setIsLight((v) => !v)}
         sidebarMode={sidebarMode}
-        onChangeSidebarMode={setSidebarMode}
+        onChangeSidebarMode={(mode) => {
+          userPinnedSidebarRef.current = true
+          autoRailAppliedRef.current = false
+          setSidebarMode(mode)
+        }}
         onOpenCommandPalette={() => setCmdOpen(true)}
         onQuickUploadClick={() => quickFileInputRef.current?.click()}
         mobileNavOpen={mobileNavOpen}
@@ -325,7 +367,9 @@ export function TTaxApp() {
           {activePage === "converter" && (
             <BatchConverterPage workspace={activeWorkspace} onRefreshCounts={refreshCounts} onToast={showToast} />
           )}
-          {activePage === "accounting" && <AccountingPage workspace={activeWorkspace} onToast={showToast} />}
+          {activePage === "accounting" && (
+            <AccountingPage workspace={activeWorkspace} onRefreshCounts={refreshCounts} onToast={showToast} />
+          )}
           {activePage === "counterparties" && <CounterpartiesPage workspace={activeWorkspace} onToast={showToast} />}
           {activePage === "apps" && (
             <MiniAppsPage workspace={activeWorkspace} onRefreshCounts={refreshCounts} onToast={showToast} />
@@ -381,8 +425,7 @@ export function TTaxApp() {
 
       {toast && (
         <div
-          onClick={() => setToast(null)}
-          className="fixed bottom-[72px] right-5 z-[150] px-4 py-2 rounded-full glass-overlay text-[12.5px] font-medium flex items-center gap-2 cursor-pointer"
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[150] px-4 py-2 rounded-full glass-overlay text-[12.5px] font-medium flex items-center gap-2.5 shadow-lg"
           style={{
             borderColor:
               toast.tone === "ok"
@@ -393,7 +436,7 @@ export function TTaxApp() {
           }}
         >
           <span
-            className="w-2 h-2 rounded-full"
+            className="w-2 h-2 rounded-full shrink-0"
             style={{
               backgroundColor:
                 toast.tone === "ok"
@@ -403,7 +446,22 @@ export function TTaxApp() {
                     : "var(--rose)"
             }}
           />
-          <span>{toast.msg}</span>
+          <span className="cursor-pointer" onClick={() => setToast(null)}>
+            {toast.msg}
+          </span>
+          {toast.undo && (
+            <button
+              type="button"
+              onClick={async () => {
+                const action = toast.undo
+                setToast(null)
+                await action?.onClick()
+              }}
+              className="ml-1 px-2.5 py-0.5 rounded-full bg-[var(--cyan-s)] text-[var(--cyan)] text-[11.5px] font-semibold hover:brightness-110"
+            >
+              {toast.undo.label}
+            </button>
+          )}
         </div>
       )}
     </>

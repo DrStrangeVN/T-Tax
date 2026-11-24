@@ -1,23 +1,45 @@
-import React, { useEffect, useState } from "react"
+import React, { useEffect, useState, useCallback } from "react"
 import { Upload, ExternalLink, FileCheck2 } from "lucide-react"
-import { useTransport, fileToPayload } from "../transport/client.js"
+import type { UiPreferences, WorkspaceDTO } from "@t-tax/core"
+import { useTransport, smartIngestFileList } from "../transport/client.js"
+
+const PREFS_KEY = "ttax:ui-prefs:v1"
+
+function readTrayPrefs(): Partial<UiPreferences> {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY)
+    return raw ? (JSON.parse(raw) as Partial<UiPreferences>) : {}
+  } catch {
+    return {}
+  }
+}
 
 export function TrayPopoverApp() {
   const transport = useTransport()
   const [tab, setTab] = useState<"drop" | "queue">("drop")
   const [unreviewed, setUnreviewed] = useState<Array<Record<string, unknown>>>([])
-  const [workspaceId, setWorkspaceId] = useState<string>("")
+  const [activeWs, setActiveWs] = useState<WorkspaceDTO | null>(null)
   const [statusMsg, setStatusMsg] = useState("")
   const [dragging, setDragging] = useState(false)
 
-  const refresh = async () => {
+  const syncThemeFromPrefs = useCallback(() => {
+    const prefs = readTrayPrefs()
+    if (typeof prefs.isLight === "boolean") {
+      document.documentElement.classList.toggle("light", prefs.isLight)
+      document.body.classList.toggle("light", prefs.isLight)
+    }
+  }, [])
+
+  const refresh = useCallback(async () => {
+    syncThemeFromPrefs()
     const wss = await transport.listWorkspaces()
-    const ws = wss[0]
+    const prefId = readTrayPrefs().activeWorkspaceId
+    const ws = (prefId ? wss.find((w) => w.id === prefId) : undefined) ?? wss[0] ?? null
     if (!ws) return
-    setWorkspaceId(ws.id)
+    setActiveWs(ws)
     const files = await transport.listFiles(ws.id, true)
     setUnreviewed(files)
-  }
+  }, [transport, syncThemeFromPrefs])
 
   useEffect(() => {
     refresh().catch(() => {})
@@ -25,21 +47,26 @@ export function TrayPopoverApp() {
       refresh().catch(() => {})
     })
     const offTheme = transport.onNativeThemeChange?.((info) => {
-      const light = !info.shouldUseDarkColors
+      const prefs = readTrayPrefs()
+      const light = typeof prefs.isLight === "boolean" ? prefs.isLight : !info.shouldUseDarkColors
       document.documentElement.classList.toggle("light", light)
       document.body.classList.toggle("light", light)
     })
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === PREFS_KEY) refresh().catch(() => {})
+    }
+    window.addEventListener("storage", onStorage)
     document.body.classList.toggle("platform-macos", transport.platform === "macos")
     return () => {
       offDrop?.()
       offTheme?.()
+      window.removeEventListener("storage", onStorage)
     }
-  }, [transport])
+  }, [transport, refresh])
 
   const handleFiles = async (fileList: FileList | null) => {
-    if (!fileList?.length || !workspaceId) return
-    const payloads = await Promise.all(Array.from(fileList).map(fileToPayload))
-    const res = await transport.ingestFiles(workspaceId, payloads, "tray")
+    if (!fileList?.length || !activeWs) return
+    const res = await smartIngestFileList(transport, activeWs.id, fileList, "tray")
     setStatusMsg(`Đã nạp ${res.createdFiles.length} chứng từ`)
     refresh()
   }
@@ -58,16 +85,19 @@ export function TrayPopoverApp() {
         handleFiles(e.dataTransfer.files)
       }}
     >
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="font-bold text-[13.5px]">T-Tax Quick Drop</span>
-          <span className="tag tnum">{unreviewed.length} chờ</span>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-[13.5px]">T-Tax Quick Drop</span>
+            <span className="tag tnum">{unreviewed.length} chờ</span>
+          </div>
+          {activeWs && (
+            <div className="text-[10.5px] text-[var(--muted)] truncate tnum">
+              {activeWs.name} · MST {activeWs.taxCode}
+            </div>
+          )}
         </div>
-        <button
-          type="button"
-          onClick={() => transport.windowAction?.("open-main")}
-          className="gb"
-        >
+        <button type="button" onClick={() => transport.windowAction?.("open-main")} className="gb shrink-0">
           <ExternalLink size={12} />
           <span>Mở App</span>
         </button>
@@ -94,7 +124,16 @@ export function TrayPopoverApp() {
             <div className="text-[11px] text-[var(--muted)] mt-0.5">Tự động ghép cặp & đẩy vào Hộp thư AI</div>
             {statusMsg && <div className="mt-2 tag tag-ok">{statusMsg}</div>}
           </div>
-          <input type="file" multiple accept=".xml,.pdf,.zip,.png,.jpg,.jpeg,.webp" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+          <input
+            type="file"
+            multiple
+            accept=".xml,.pdf,.zip,.png,.jpg,.jpeg,.webp"
+            className="hidden"
+            onChange={(e) => {
+              handleFiles(e.target.files)
+              e.target.value = ""
+            }}
+          />
         </label>
       ) : (
         <div className="flex-1 overflow-y-auto space-y-1.5 pr-0.5">

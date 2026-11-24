@@ -1,5 +1,6 @@
 import { app, BrowserWindow, nativeImage, screen, Tray } from "electron"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { basename, join } from "node:path"
 import type { TTaxService } from "@t-tax/db"
 
@@ -20,6 +21,7 @@ export function createTrayController(params: {
   preloadPath: string
   rendererUrlOrFile: { url?: string; file?: string; trayUrl?: string; trayFile?: string }
   service: TTaxService
+  getActiveWorkspaceId?: () => string
   getMainWindow: () => BrowserWindow | null
 }): TrayController {
   const iconFile = process.platform === "darwin" ? "trayTemplate.png" : "icon.png"
@@ -102,16 +104,18 @@ export function createTrayController(params: {
   // Support dropping XML / PDF / ZIP files directly onto the macOS Menu Bar icon
   tray.on("drop-files", async (_event, filePaths) => {
     try {
-      const ws = params.service.ensureWorkspace()
-      const inputs = filePaths.map((fp) => ({
-        filename: basename(fp),
-        buffer: readFileSync(fp)
-      }))
-      const res = await params.service.ingestFiles(ws.id, inputs, "tray")
+      const targetWsId = params.getActiveWorkspaceId?.() || params.service.ensureWorkspace().id
+      const inputs = await Promise.all(
+        filePaths.map(async (fp) => ({
+          filename: basename(fp),
+          buffer: await readFile(fp)
+        }))
+      )
+      const res = await params.service.ingestFiles(targetWsId, inputs, "tray")
       if (res.createdFiles.length > 0) {
         const mainWin = params.getMainWindow()
         mainWin?.webContents.send("ttax:tray-dropped")
-        const pending = params.service.listFiles(ws.id, { unreviewedOnly: true }).length
+        const pending = params.service.getSidebarBadgeCounts(targetWsId).unreviewedCount
         tray.setToolTip(`T-Tax — ${pending} chứng từ chờ duyệt`)
       }
     } catch {

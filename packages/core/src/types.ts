@@ -23,6 +23,19 @@ export interface UiPreferences {
 export interface WorkspaceBadgeCounts {
   unreviewedCount: number
   complianceWarnings: number
+  unmatchedBankCount?: number
+}
+
+export interface TrialBalanceRow {
+  code: string
+  name: string
+  nature: string
+  openingDebit: number
+  openingCredit: number
+  periodDebit: number
+  periodCredit: number
+  closingDebit: number
+  closingCredit: number
 }
 
 export interface BatchAnalyzeProgressEvent {
@@ -52,6 +65,7 @@ export interface WorkspaceDTO {
   baseCurrency: string
   address?: string | null
   bankDetails?: BankDetails | null
+  lockDate?: string | null
   logoPath?: string | null
   createdAt: string
   updatedAt: string

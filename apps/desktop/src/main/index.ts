@@ -71,6 +71,7 @@ app.whenReady().then(() => {
   const vault = new VaultStorage(vaultDir)
   const service = new TTaxService(conn.db, conn.sqlite, vault)
   const defaultWs = service.ensureWorkspace()
+  let activeWorkspaceId = defaultWs.id
   const secrets = new SecretVault(userDataDir)
 
   const preloadPath = join(__dirname, "../preload/index.cjs")
@@ -90,8 +91,8 @@ app.whenReady().then(() => {
 
   const refreshTrayCount = () => {
     try {
-      const pending = service.listFiles(defaultWs.id, { unreviewedOnly: true }).length
-      trayCtrl?.updateTooltip(pending)
+      const counts = service.getSidebarBadgeCounts(activeWorkspaceId)
+      trayCtrl?.updateTooltip(counts.unreviewedCount)
     } catch {
       // ignore
     }
@@ -101,6 +102,7 @@ app.whenReady().then(() => {
     preloadPath,
     rendererUrlOrFile: rendererTarget,
     service,
+    getActiveWorkspaceId: () => activeWorkspaceId,
     getMainWindow: () => mainWindow
   })
   refreshTrayCount()
@@ -109,7 +111,11 @@ app.whenReady().then(() => {
     service,
     secrets,
     getMainWindow: () => mainWindow,
-    onCountsChanged: refreshTrayCount
+    onCountsChanged: refreshTrayCount,
+    onWorkspaceChanged: (wsId) => {
+      activeWorkspaceId = wsId
+      refreshTrayCount()
+    }
   })
 
   // Background IMAP auto-sync scheduler (checks every 5 minutes without blocking shutdown)

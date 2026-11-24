@@ -1,12 +1,28 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from "react"
-import { Upload, CheckCircle2, Download, Link2, Unlink, Search, ChevronDown } from "lucide-react"
-import type { HkdTaxSectorCode, UiPreferences, WorkspaceDTO } from "@t-tax/core"
+import { createPortal } from "react-dom"
+import { useVirtualizer } from "@tanstack/react-virtual"
+import {
+  Upload,
+  CheckCircle2,
+  Download,
+  Link2,
+  Unlink,
+  Search,
+  ChevronDown,
+  Plus,
+  X,
+  ArrowRightLeft,
+  Landmark
+} from "lucide-react"
+import type { HkdTaxSectorCode, TrialBalanceRow, UiPreferences, WorkspaceDTO } from "@t-tax/core"
 import { HKD_TAX_SECTORS } from "@t-tax/core/browser"
 import { useTransport, fileToPayload } from "../transport/client.js"
+import { MoneyInput } from "../components/MoneyInput.js"
 import { formatDateVi, formatMoney } from "../utils/format.js"
 
 interface AccountingProps {
   workspace: WorkspaceDTO
+  onRefreshCounts?: () => void
   onToast: (msg: string, tone?: "ok" | "warn" | "err") => void
 }
 
@@ -24,6 +40,16 @@ interface JournalEntryItem {
     amountVnd: number
     description: string | null
   }>
+}
+
+interface FlatJournalLine {
+  lineId: string
+  voucherNo: string
+  voucherDate: string
+  description: string
+  debitAccount: string
+  creditAccount: string
+  amountVnd: number
 }
 
 interface BankStmtRow {
@@ -100,15 +126,30 @@ function AccountCombobox({
   onSelect: (code: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [menuPos, setMenuPos] = useState<{ left: number; top?: number; bottom?: number }>({ left: 0, top: 0 })
   const [q, setQ] = useState("")
   const boxRef = useRef<HTMLDivElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+
+  const toggleOpen = (next: boolean) => {
+    if (next && boxRef.current) {
+      const rect = boxRef.current.getBoundingClientRect()
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - 302))
+      if (rect.bottom > window.innerHeight - 240) {
+        setMenuPos({ left, bottom: window.innerHeight - rect.top + 4 })
+      } else {
+        setMenuPos({ left, top: rect.bottom + 4 })
+      }
+    }
+    setOpen(next)
+  }
 
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
-      if (boxRef.current && !boxRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
+      const t = e.target as Node
+      if (boxRef.current?.contains(t) || menuRef.current?.contains(t)) return
+      setOpen(false)
     }
     window.addEventListener("mousedown", onDown)
     return () => window.removeEventListener("mousedown", onDown)
@@ -130,10 +171,10 @@ function AccountCombobox({
           title={currentAccount ? `${currentAccount.code} — ${currentAccount.name}` : value}
           onFocus={() => {
             setQ("")
-            setOpen(true)
+            toggleOpen(true)
           }}
           onChange={(e) => {
-            setOpen(true)
+            toggleOpen(true)
             setQ(e.target.value)
           }}
           onKeyDown={(e) => {
@@ -151,7 +192,7 @@ function AccountCombobox({
           type="button"
           onClick={() => {
             setQ("")
-            setOpen(!open)
+            toggleOpen(!open)
           }}
           className="text-[var(--dim)] hover:text-[var(--text)] shrink-0"
           tabIndex={-1}
@@ -160,51 +201,59 @@ function AccountCombobox({
         </button>
       </div>
 
-      {open && (
-        <div className="menu absolute left-0 mt-1 w-[280px] p-2 z-40 space-y-1">
-          <div className="max-h-[210px] overflow-y-auto space-y-0.5">
-            {filtered.map((acc) => (
-              <button
-                key={acc.code}
-                type="button"
-                onClick={() => {
-                  setOpen(false)
-                  if (acc.code !== value) onSelect(acc.code)
-                }}
-                className={`w-full text-left px-2 py-1 rounded-[7px] text-[11.5px] flex items-center gap-2 hover:bg-[var(--sel)] ${
-                  acc.code === value ? "bg-[var(--cyan-s)] text-[var(--cyan)] font-semibold" : "text-[var(--text)]"
-                }`}
-              >
-                <span className="font-mono tnum shrink-0 font-semibold w-16">{acc.code}</span>
-                <span className="truncate text-[var(--muted)]">{acc.name}</span>
-              </button>
-            ))}
-            {q.trim() && !accounts.some((a) => a.code.toLowerCase() === q.trim().toLowerCase()) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setOpen(false)
-                  onSelect(q.trim())
-                }}
-                className="w-full text-left px-2 py-1 rounded-[7px] text-[11.5px] text-[var(--cyan)] hover:bg-[var(--sel)]"
-              >
-                Dùng mã tùy chỉnh: <strong>{q.trim()}</strong>
-              </button>
-            )}
-          </div>
-        </div>
-      )}
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={{ position: "fixed", left: menuPos.left, top: menuPos.top, bottom: menuPos.bottom }}
+            className="menu w-[290px] p-2 z-[260] space-y-1 shadow-xl"
+          >
+            <div className="max-h-[210px] overflow-y-auto space-y-0.5">
+              {filtered.map((acc) => (
+                <button
+                  key={acc.code}
+                  type="button"
+                  onClick={() => {
+                    setOpen(false)
+                    if (acc.code !== value) onSelect(acc.code)
+                  }}
+                  className={`w-full text-left px-2 py-1 rounded-[7px] text-[11.5px] flex items-center gap-2 hover:bg-[var(--sel)] ${
+                    acc.code === value ? "bg-[var(--cyan-s)] text-[var(--cyan)] font-semibold" : "text-[var(--text)]"
+                  }`}
+                >
+                  <span className="font-mono tnum shrink-0 font-semibold w-16">{acc.code}</span>
+                  <span className="truncate text-[var(--muted)]">{acc.name}</span>
+                </button>
+              ))}
+              {q.trim() && !accounts.some((a) => a.code.toLowerCase() === q.trim().toLowerCase()) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false)
+                    onSelect(q.trim())
+                  }}
+                  className="w-full text-left px-2 py-1 rounded-[7px] text-[11.5px] text-[var(--cyan)] hover:bg-[var(--sel)]"
+                >
+                  Dùng mã tùy chỉnh: <strong>{q.trim()}</strong>
+                </button>
+              )}
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   )
 }
 
-export function AccountingPage({ workspace, onToast }: AccountingProps) {
+export function AccountingPage({ workspace, onRefreshCounts, onToast }: AccountingProps) {
   const transport = useTransport()
-  const [tab, setTab] = useState<"journal" | "vat" | "hkd" | "bank">("journal")
+  const [tab, setTab] = useState<"journal" | "trial_balance" | "vat" | "hkd" | "bank">("journal")
   const [period, setPeriod] = useState<"all" | "month" | "quarter" | "year">("all")
   const [hkdSector, setHkdSector] = useState<HkdTaxSectorCode>(() => loadHkdSector())
 
   const [entries, setEntries] = useState<JournalEntryItem[]>([])
+  const [journalSearch, setJournalSearch] = useState("")
+  const [trialRows, setTrialRows] = useState<TrialBalanceRow[]>([])
   const [accounts, setAccounts] = useState<AccountOption[]>([])
   const [txRows, setTxRows] = useState<Array<Record<string, unknown>>>([])
   const [bankRows, setBankRows] = useState<BankStmtRow[]>([])
@@ -213,16 +262,31 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
   const [selectedStmtId, setSelectedStmtId] = useState<string | null>(null)
   const [txMatchSearch, setTxMatchSearch] = useState("")
 
-  const range = useMemo(() => getPeriodRange(period), [period])
+  const [showManualJeModal, setShowManualJeModal] = useState(false)
+  const [manualJe, setManualJe] = useState({
+    voucherNo: "",
+    voucherDate: new Date().toISOString().slice(0, 10),
+    description: "",
+    debitAccount: "6427",
+    creditAccount: "1121",
+    amountVnd: 0
+  })
+
+  const range = useMemo(() => {
+    const r = getPeriodRange(period)
+    return { dateFrom: r.dateFrom, dateTo: r.dateTo }
+  }, [period])
 
   const loadAll = useCallback(async () => {
-    const [je, tx, bk, accs] = await Promise.all([
+    const [je, tb, tx, bk, accs] = await Promise.all([
       transport.listJournalEntries(workspace.id, range),
+      transport.getTrialBalance(workspace.id, range),
       transport.listTransactions(workspace.id, { ...range, limit: 2000 }),
       transport.listBankStatements(workspace.id),
       transport.listAccounts(workspace.id, workspace.accountingRegime)
     ])
     setEntries(je as unknown as JournalEntryItem[])
+    setTrialRows(tb)
     setTxRows(tx.rows)
     const typedBank = bk as unknown as BankStmtRow[]
     setBankRows(typedBank)
@@ -239,9 +303,53 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
   }, [loadAll])
 
   const handleUpdateLine = async (lineId: string, field: "debitAccount" | "creditAccount", value: string) => {
-    await transport.updateJournalLine(lineId, { [field]: value })
-    onToast("Đã cập nhật tài khoản định khoản.", "ok")
-    loadAll()
+    try {
+      await transport.updateJournalLine(lineId, { [field]: value })
+      onToast("Đã cập nhật tài khoản định khoản.", "ok")
+      loadAll()
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Không thể cập nhật bút toán", "err")
+    }
+  }
+
+  const handleCreateManualJe = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      const res = await transport.createManualJournalEntry(workspace.id, {
+        voucherNo: manualJe.voucherNo || undefined,
+        voucherDate: manualJe.voucherDate,
+        description: manualJe.description || "Phiếu kế toán thủ công",
+        lines: [
+          {
+            debitAccount: manualJe.debitAccount,
+            creditAccount: manualJe.creditAccount,
+            amountVnd: manualJe.amountVnd,
+            description: manualJe.description
+          }
+        ]
+      })
+      setShowManualJeModal(false)
+      setManualJe((p) => ({ ...p, voucherNo: "", description: "", amountVnd: 0 }))
+      onToast(`Đã ghi sổ phiếu ${res.voucherNo}.`, "ok")
+      loadAll()
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Lỗi lập phiếu kế toán", "err")
+    }
+  }
+
+  const handleVatClosing = async () => {
+    try {
+      const voucherDate = range.dateTo || new Date().toISOString().slice(0, 10)
+      const res = await transport.postVatClosingEntry(workspace.id, { ...range, voucherDate })
+      if (!res.posted) {
+        onToast(res.message || "Không có số dư VAT đủ điều kiện kết chuyển.", "warn")
+        return
+      }
+      onToast(`Đã kết chuyển VAT ${formatMoney(res.amountVnd, "VND")} (${res.voucherNo}).`, "ok")
+      loadAll()
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Lỗi kết chuyển VAT", "err")
+    }
   }
 
   const handleBankUpload = async (fileList: FileList | null) => {
@@ -250,6 +358,7 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
     try {
       const payload = await fileToPayload(f)
       const res = await transport.importBankStatement(workspace.id, payload.filename, payload.base64, bankCode)
+      onRefreshCounts?.()
       onToast(
         `Đã nhập ${String(res.importedCount)} dòng sao kê — Gợi ý khớp ${String(res.suggestedMatches)} hóa đơn.`,
         "ok"
@@ -262,48 +371,114 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
 
   const handleConfirmMatch = async (stmtId: string, txId: string) => {
     await transport.confirmBankMatch(workspace.id, stmtId, txId)
+    onRefreshCounts?.()
     onToast("Đã xác nhận đối chiếu thanh toán 3 bên!", "ok")
     loadAll()
   }
 
   const handleUnmatch = async (stmtId: string) => {
     await transport.unmatchBankStatement(workspace.id, stmtId)
+    onRefreshCounts?.()
     onToast("Đã hủy ghép đối chiếu dòng sao kê.", "ok")
     loadAll()
   }
 
-  // Compute Debit = Credit total across displayed journal entries
-  const journalSum = useMemo(() => {
-    let debit = 0
-    let credit = 0
+  const handleQuickPostBank = async (stmtId: string, kind: "bank_fee" | "interest") => {
+    try {
+      await transport.quickPostBankStatement(workspace.id, stmtId, { kind })
+      onRefreshCounts?.()
+      onToast(
+        kind === "bank_fee"
+          ? "Đã hạch toán Phí NH (Nợ 6425 / Có 1121) & khớp sao kê."
+          : "Đã hạch toán Lãi tiền gửi (Nợ 1121 / Có 515) & khớp sao kê.",
+        "ok"
+      )
+      loadAll()
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Lỗi hạch toán nhanh sao kê", "err")
+    }
+  }
+
+  const flatJournalLines = useMemo<FlatJournalLine[]>(() => {
+    const q = journalSearch.trim().toLowerCase()
+    const out: FlatJournalLine[] = []
     for (const je of entries) {
       for (const ln of je.lines) {
-        if (ln.debitAccount) debit += Number(ln.amountVnd ?? 0)
-        if (ln.creditAccount) credit += Number(ln.amountVnd ?? 0)
+        const desc = ln.description || je.description || ""
+        if (
+          q &&
+          !je.voucherNo.toLowerCase().includes(q) &&
+          !desc.toLowerCase().includes(q) &&
+          !ln.debitAccount.toLowerCase().includes(q) &&
+          !ln.creditAccount.toLowerCase().includes(q)
+        ) {
+          continue
+        }
+        out.push({
+          lineId: ln.id,
+          voucherNo: je.voucherNo,
+          voucherDate: je.voucherDate,
+          description: desc,
+          debitAccount: ln.debitAccount,
+          creditAccount: ln.creditAccount,
+          amountVnd: ln.amountVnd
+        })
       }
     }
-    return { debit, credit, balanced: debit === credit }
-  }, [entries])
+    return out
+  }, [entries, journalSearch])
 
-  // Compute VAT summary by rate
+  const journalScrollRef = useRef<HTMLDivElement | null>(null)
+  const journalVirtualizer = useVirtualizer({
+    count: flatJournalLines.length,
+    getScrollElement: () => journalScrollRef.current,
+    estimateSize: () => 44,
+    overscan: 16
+  })
+
+  const journalSum = useMemo(() => {
+    let debit = 0
+    for (const ln of flatJournalLines) {
+      debit += Number(ln.amountVnd ?? 0)
+    }
+    return { debit, balanced: true }
+  }, [flatJournalLines])
+
+  // FX-normalized VAT table
   const vatGroups = useMemo(() => {
     const map = new Map<string, { inPre: number; inVat: number; outPre: number; outVat: number }>()
     for (const tx of txRows) {
       const rate = String(tx.vatRateCode || "Khác")
+      const fx = Number(tx.fxRateDecimal ?? 1) || 1
+      const preVnd = Math.round(Number(tx.preTaxAmount ?? 0) * fx)
+      const vatVnd = Math.round(Number(tx.vatAmount ?? 0) * fx)
       const entry = map.get(rate) ?? { inPre: 0, inVat: 0, outPre: 0, outVat: 0 }
       if (tx.direction === "input") {
-        entry.inPre += Number(tx.preTaxAmount ?? 0)
-        entry.inVat += Number(tx.vatAmount ?? 0)
+        entry.inPre += preVnd
+        entry.inVat += vatVnd
       } else {
-        entry.outPre += Number(tx.preTaxAmount ?? 0)
-        entry.outVat += Number(tx.vatAmount ?? 0)
+        entry.outPre += preVnd
+        entry.outVat += vatVnd
       }
       map.set(rate, entry)
     }
     return map
   }, [txRows])
 
-  // HKD 2026 calculation preview
+  const trialTotals = useMemo(() => {
+    return trialRows.reduce(
+      (acc, r) => ({
+        od: acc.od + r.openingDebit,
+        oc: acc.oc + r.openingCredit,
+        pd: acc.pd + r.periodDebit,
+        pc: acc.pc + r.periodCredit,
+        cd: acc.cd + r.closingDebit,
+        cc: acc.cc + r.closingCredit
+      }),
+      { od: 0, oc: 0, pd: 0, pc: 0, cd: 0, cc: 0 }
+    )
+  }, [trialRows])
+
   const hkdRevenue = txRows
     .filter((t) => t.direction === "output")
     .reduce((s, t) => s + Number(t.convertedTotalVnd ?? t.totalAmount ?? 0), 0)
@@ -348,13 +523,14 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-5 py-3 border-b border-[var(--line)] flex flex-wrap items-center justify-between gap-2.5 bg-[var(--sheet-bg)] shrink-0">
-        <div className="flex flex-wrap items-center gap-2.5">
+      <div className="px-4 py-2.5 border-b border-[var(--line)] flex flex-wrap items-center justify-between gap-2 bg-[var(--sheet-bg)] shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="seg">
             {[
               { id: "journal", label: "Bút toán Nợ / Có" },
-              { id: "vat", label: "Bảng kê Thuế GTGT" },
-              { id: "hkd", label: "Sổ Hộ Kinh Doanh 2026" },
+              { id: "trial_balance", label: "Cân đối Tài khoản" },
+              { id: "vat", label: "Bảng kê GTGT" },
+              { id: "hkd", label: "Sổ HKD 2026" },
               { id: "bank", label: "Đối chiếu Sao kê" }
             ].map((t) => (
               <button
@@ -389,118 +565,207 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
 
         <div className="flex items-center gap-2">
           {tab === "journal" && (
-            <span className={`tag tnum ${journalSum.balanced ? "tag-ok" : "tag-warn"}`}>
-              ∑Nợ = ∑Có: {formatMoney(journalSum.debit, "VND")}
-            </span>
+            <>
+              <span className="tag tag-ok tnum">∑Nợ = ∑Có: {formatMoney(journalSum.debit, "VND")}</span>
+              <button type="button" onClick={() => setShowManualJeModal(true)} className="pb">
+                <Plus size={13} />
+                <span>Phiếu kế toán</span>
+              </button>
+            </>
           )}
-          <button
-            type="button"
-            onClick={() => transport.exportReport(workspace.id, "htkk_in", range)}
-            className="gb"
-          >
+          {tab === "vat" && (
+            <button type="button" onClick={handleVatClosing} className="pb">
+              <ArrowRightLeft size={13} />
+              <span>Kết chuyển GTGT cuối kỳ</span>
+            </button>
+          )}
+          <button type="button" onClick={() => transport.exportReport(workspace.id, "htkk_in", range)} className="gb">
             <Download size={13} />
-            <span>Xuất HTKK Mua vào</span>
+            <span className="hidden xl:inline">HTKK Mua vào</span>
           </button>
-          <button
-            type="button"
-            onClick={() => transport.exportReport(workspace.id, "misa_in", range)}
-            className="gb"
-          >
+          <button type="button" onClick={() => transport.exportReport(workspace.id, "misa_in", range)} className="gb">
             <Download size={13} />
-            <span>Xuất MISA</span>
+            <span className="hidden xl:inline">Xuất MISA</span>
           </button>
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto p-5">
+      {/* Main Content Container */}
+      <div className="flex-1 min-h-0 flex flex-col p-4 sm:p-5 overflow-hidden">
         {tab === "journal" && (
-          <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-visible">
-            <table className="w-full text-left border-collapse text-[12px]">
-              <thead className="bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
-                <tr>
-                  <th className="py-2.5 px-3">Số CT</th>
-                  <th className="py-2.5 px-3">Ngày CT</th>
-                  <th className="py-2.5 px-3">Diễn giải</th>
-                  <th className="py-2.5 px-3">TK Nợ</th>
-                  <th className="py-2.5 px-3">TK Có</th>
-                  <th className="py-2.5 px-3 text-right">Số tiền (VND)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[var(--line)]">
-                {entries.length === 0 ? (
+          <div className="flex-1 min-h-0 flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-2 shrink-0">
+              <div className="relative">
+                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--dim)]" />
+                <input
+                  value={journalSearch}
+                  onChange={(e) => setJournalSearch(e.target.value)}
+                  placeholder="Lọc số CT, diễn giải hoặc mã TK (1331, 642...)..."
+                  className="h-8 w-[290px] pl-8 pr-3 rounded-full border border-[var(--line)] bg-[var(--panel)] text-[12px] outline-none focus:border-[var(--cyan)]"
+                />
+              </div>
+              <span className="text-[11.5px] text-[var(--muted)] tnum">{flatJournalLines.length} dòng định khoản</span>
+            </div>
+
+            <div className="flex-1 min-h-0 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] flex flex-col overflow-hidden">
+              <div
+                style={{ gridTemplateColumns: "126px 88px minmax(180px, 1fr) 118px 118px 144px" }}
+                className="bg-[var(--raised)] text-[10.5px] uppercase font-semibold text-[var(--muted)] border-b border-[var(--line)] grid gap-2.5 px-3.5 py-2.5 shrink-0"
+              >
+                <div>Số CT</div>
+                <div>Ngày</div>
+                <div>Diễn giải</div>
+                <div>TK Nợ</div>
+                <div>TK Có</div>
+                <div className="text-right">Số tiền (VND)</div>
+              </div>
+
+              {flatJournalLines.length === 0 ? (
+                <div className="flex-1 grid place-items-center text-[12px] text-[var(--dim)] p-8">
+                  Chưa có bút toán nào trong kỳ. Hãy duyệt chứng từ ở Hộp thư AI hoặc lập Phiếu kế toán.
+                </div>
+              ) : (
+                <div ref={journalScrollRef} className="flex-1 min-h-0 overflow-y-auto">
+                  <div style={{ height: `${journalVirtualizer.getTotalSize()}px`, position: "relative" }}>
+                    {journalVirtualizer.getVirtualItems().map((vr) => {
+                      const ln = flatJournalLines[vr.index]!
+                      return (
+                        <div
+                          key={ln.lineId}
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            height: `${vr.size}px`,
+                            transform: `translateY(${vr.start}px)`,
+                            gridTemplateColumns: "126px 88px minmax(180px, 1fr) 118px 118px 144px"
+                          }}
+                          className="grid gap-2.5 items-center px-3.5 border-b border-[var(--line)] hover:bg-[var(--hover)] text-[12px]"
+                        >
+                          <div className="font-mono text-[11.5px] tnum truncate">{ln.voucherNo}</div>
+                          <div className="tnum text-[var(--muted)] text-[11.5px]">{formatDateVi(ln.voucherDate)}</div>
+                          <div className="truncate">{ln.description}</div>
+                          <div>
+                            <AccountCombobox
+                              value={ln.debitAccount}
+                              accounts={accounts}
+                              onSelect={(code) => handleUpdateLine(ln.lineId, "debitAccount", code)}
+                            />
+                          </div>
+                          <div>
+                            <AccountCombobox
+                              value={ln.creditAccount}
+                              accounts={accounts}
+                              onSelect={(code) => handleUpdateLine(ln.lineId, "creditAccount", code)}
+                            />
+                          </div>
+                          <div className="text-right font-semibold tnum">{formatMoney(ln.amountVnd, "VND")}</div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {tab === "trial_balance" && (
+          <div className="flex-1 min-h-0 flex flex-col rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-auto">
+              <table className="w-full text-left border-collapse text-[12px] min-w-[820px]">
+                <thead className="sticky top-0 bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
                   <tr>
-                    <td colSpan={6} className="py-10 text-center text-[var(--dim)]">
-                      Chưa có bút toán nào trong kỳ. Hãy duyệt chứng từ ở Hộp thư AI hoặc Quét XML.
-                    </td>
+                    <th className="py-2.5 px-3">Số hiệu TK</th>
+                    <th className="py-2.5 px-3">Tên tài khoản</th>
+                    <th className="py-2.5 px-3 text-right">Dư Nợ ĐK</th>
+                    <th className="py-2.5 px-3 text-right">Dư Có ĐK</th>
+                    <th className="py-2.5 px-3 text-right">Phát sinh Nợ</th>
+                    <th className="py-2.5 px-3 text-right">Phát sinh Có</th>
+                    <th className="py-2.5 px-3 text-right">Dư Nợ CK</th>
+                    <th className="py-2.5 px-3 text-right">Dư Có CK</th>
                   </tr>
-                ) : (
-                  entries.flatMap((je) =>
-                    je.lines.map((ln) => (
-                      <tr key={ln.id} className="hover:bg-[var(--hover)]">
-                        <td className="py-2 px-3 font-mono text-[11.5px] tnum">{je.voucherNo}</td>
-                        <td className="py-2 px-3 tnum text-[var(--muted)]">{formatDateVi(je.voucherDate)}</td>
-                        <td className="py-2 px-3">{ln.description || je.description}</td>
-                        <td className="py-2 px-3">
-                          <AccountCombobox
-                            value={ln.debitAccount}
-                            accounts={accounts}
-                            onSelect={(code) => handleUpdateLine(ln.id, "debitAccount", code)}
-                          />
+                </thead>
+                <tbody className="divide-y divide-[var(--line)]">
+                  {trialRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-10 text-center text-[var(--dim)]">
+                        Chưa có số liệu phát sinh tài khoản trong kỳ.
+                      </td>
+                    </tr>
+                  ) : (
+                    trialRows.map((row) => (
+                      <tr key={row.code} className="hover:bg-[var(--hover)]">
+                        <td className="py-2 px-3 font-mono font-semibold text-[var(--cyan)] tnum">{row.code}</td>
+                        <td className="py-2 px-3">{row.name}</td>
+                        <td className="py-2 px-3 text-right tnum text-[var(--muted)]">{formatMoney(row.openingDebit)}</td>
+                        <td className="py-2 px-3 text-right tnum text-[var(--muted)]">{formatMoney(row.openingCredit)}</td>
+                        <td className="py-2 px-3 text-right tnum font-medium">{formatMoney(row.periodDebit)}</td>
+                        <td className="py-2 px-3 text-right tnum font-medium">{formatMoney(row.periodCredit)}</td>
+                        <td className="py-2 px-3 text-right tnum font-semibold text-[var(--text)]">
+                          {formatMoney(row.closingDebit)}
                         </td>
-                        <td className="py-2 px-3">
-                          <AccountCombobox
-                            value={ln.creditAccount}
-                            accounts={accounts}
-                            onSelect={(code) => handleUpdateLine(ln.id, "creditAccount", code)}
-                          />
+                        <td className="py-2 px-3 text-right tnum font-semibold text-[var(--text)]">
+                          {formatMoney(row.closingCredit)}
                         </td>
-                        <td className="py-2 px-3 text-right font-semibold tnum">{formatMoney(ln.amountVnd, "VND")}</td>
                       </tr>
                     ))
-                  )
-                )}
-              </tbody>
-            </table>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="px-3 py-2.5 border-t border-[var(--line)] bg-[var(--sheet-bg)] grid grid-cols-8 text-[11.5px] font-semibold tnum shrink-0">
+              <div className="col-span-2 text-[var(--muted)]">Tổng Cân đối Tài khoản ({trialRows.length} TK)</div>
+              <div className="text-right">{formatMoney(trialTotals.od)}</div>
+              <div className="text-right">{formatMoney(trialTotals.oc)}</div>
+              <div className="text-right text-[var(--cyan)]">{formatMoney(trialTotals.pd)}</div>
+              <div className="text-right text-[var(--cyan)]">{formatMoney(trialTotals.pc)}</div>
+              <div className="text-right text-[var(--green)]">{formatMoney(trialTotals.cd)}</div>
+              <div className="text-right text-[var(--green)]">{formatMoney(trialTotals.cc)}</div>
+            </div>
           </div>
         )}
 
         {tab === "vat" && (
-          <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
-            <table className="w-full text-left border-collapse text-[12.5px]">
-              <thead className="bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
-                <tr>
-                  <th className="py-2.5 px-4">Nhóm Thuế suất</th>
-                  <th className="py-2.5 px-4 text-right">Doanh số Mua vào</th>
-                  <th className="py-2.5 px-4 text-right">VAT Đầu vào</th>
-                  <th className="py-2.5 px-4 text-right">Doanh số Bán ra</th>
-                  <th className="py-2.5 px-4 text-right">VAT Đầu ra</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[var(--line)]">
-                {vatGroups.size === 0 ? (
+          <div className="flex-1 overflow-y-auto">
+            <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
+              <table className="w-full text-left border-collapse text-[12.5px]">
+                <thead className="bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
                   <tr>
-                    <td colSpan={5} className="py-10 text-center text-[var(--dim)]">
-                      Không có chứng từ thuế GTGT trong kỳ đã chọn.
-                    </td>
+                    <th className="py-2.5 px-4">Nhóm Thuế suất</th>
+                    <th className="py-2.5 px-4 text-right">Doanh số Mua vào (VND)</th>
+                    <th className="py-2.5 px-4 text-right">VAT Đầu vào (VND)</th>
+                    <th className="py-2.5 px-4 text-right">Doanh số Bán ra (VND)</th>
+                    <th className="py-2.5 px-4 text-right">VAT Đầu ra (VND)</th>
                   </tr>
-                ) : (
-                  [...vatGroups.entries()].map(([rate, g]) => (
-                    <tr key={rate} className="hover:bg-[var(--hover)]">
-                      <td className="py-2.5 px-4 font-semibold">{rate}</td>
-                      <td className="py-2.5 px-4 text-right tnum">{formatMoney(g.inPre)}</td>
-                      <td className="py-2.5 px-4 text-right tnum text-[var(--cyan)]">{formatMoney(g.inVat)}</td>
-                      <td className="py-2.5 px-4 text-right tnum">{formatMoney(g.outPre)}</td>
-                      <td className="py-2.5 px-4 text-right tnum text-[var(--amber)]">{formatMoney(g.outVat)}</td>
+                </thead>
+                <tbody className="divide-y divide-[var(--line)]">
+                  {vatGroups.size === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-10 text-center text-[var(--dim)]">
+                        Không có chứng từ thuế GTGT trong kỳ đã chọn.
+                      </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    [...vatGroups.entries()].map(([rate, g]) => (
+                      <tr key={rate} className="hover:bg-[var(--hover)]">
+                        <td className="py-2.5 px-4 font-semibold">{rate}</td>
+                        <td className="py-2.5 px-4 text-right tnum">{formatMoney(g.inPre)}</td>
+                        <td className="py-2.5 px-4 text-right tnum text-[var(--cyan)]">{formatMoney(g.inVat)}</td>
+                        <td className="py-2.5 px-4 text-right tnum">{formatMoney(g.outPre)}</td>
+                        <td className="py-2.5 px-4 text-right tnum text-[var(--amber)]">{formatMoney(g.outVat)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
         {tab === "hkd" && (
-          <div className="space-y-4">
+          <div className="flex-1 overflow-y-auto space-y-4">
             <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-[13px] font-semibold text-[var(--text)]">Ngành nghề tính thuế Khoán / Kê khai (TT 40)</div>
@@ -551,8 +816,8 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
         )}
 
         {tab === "bank" && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex-1 min-h-0 flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2.5 shrink-0">
               <div className="flex flex-wrap items-center gap-2">
                 <select
                   value={bankCode}
@@ -600,11 +865,11 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
               <span className="text-[11.5px] text-[var(--muted)] tnum">{filteredBankRows.length} giao dịch</span>
             </div>
 
-            {/* 2-Pane Bank Reconciliation Workbench */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-7 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-hidden">
+            {/* Independent Scroll 2-Pane Bank Reconciliation Workbench */}
+            <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-7 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] overflow-y-auto min-h-0">
                 <table className="w-full text-left border-collapse text-[12px]">
-                  <thead className="bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
+                  <thead className="sticky top-0 bg-[var(--raised)] text-[10.5px] uppercase text-[var(--muted)] border-b border-[var(--line)]">
                     <tr>
                       <th className="py-2.5 px-3">Ngày GD</th>
                       <th className="py-2.5 px-3">Nội dung chuyển khoản</th>
@@ -658,15 +923,15 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
                 </table>
               </div>
 
-              {/* Right Match Inspector */}
-              <div className="lg:col-span-5 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3.5 h-fit">
+              {/* Independent Scroll Right Match Inspector */}
+              <div className="lg:col-span-5 rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 flex flex-col gap-3 min-h-0 overflow-y-auto">
                 {!selectedStmt ? (
                   <div className="py-10 text-center text-[12px] text-[var(--dim)]">
-                    Chọn một dòng sao kê bên trái để xem hóa đơn đối chiếu hoặc ghép thủ công.
+                    Chọn một dòng sao kê bên trái để xem hóa đơn đối chiếu hoặc hạch toán nhanh phí ngân hàng.
                   </div>
                 ) : (
                   <>
-                    <div className="space-y-1">
+                    <div className="space-y-1 shrink-0">
                       <div className="flex items-center justify-between">
                         <span className="tag">{selectedStmt.bankCode}</span>
                         <span className="text-[11.5px] text-[var(--muted)] tnum">{formatDateVi(selectedStmt.txDate)}</span>
@@ -679,8 +944,8 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
                       <p className="text-[12px] text-[var(--muted)] leading-relaxed">{selectedStmt.description}</p>
                     </div>
 
-                    {selectedStmt.matchedTransaction && (
-                      <div className="p-3 rounded-[11px] border border-[var(--line2)] bg-[var(--raised)] space-y-2">
+                    {selectedStmt.matchedTransaction ? (
+                      <div className="p-3 rounded-[11px] border border-[var(--line2)] bg-[var(--raised)] space-y-2 shrink-0">
                         <div className="flex items-center justify-between text-[11px]">
                           <span className="font-semibold text-[var(--text)]">
                             {selectedStmt.matchStatus === "matched" ? "Hóa đơn đã khớp" : "Gợi ý khớp tự động"}
@@ -713,12 +978,40 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
                           </button>
                         </div>
                       </div>
+                    ) : (
+                      <div className="p-3 rounded-[11px] border border-[var(--line)] bg-[var(--raised)] space-y-2 shrink-0">
+                        <div className="text-[11.5px] font-semibold text-[var(--text)] flex items-center gap-1.5">
+                          <Landmark size={13} className="text-[var(--cyan)]" />
+                          <span>Không có hóa đơn? Hạch toán nhanh giao dịch ngân hàng</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {selectedStmt.debitAmount > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => handleQuickPostBank(selectedStmt.id, "bank_fee")}
+                              className="gb hl"
+                            >
+                              <Plus size={12.5} />
+                              <span>Tạo Phiếu chi Phí NH (TK 6425)</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleQuickPostBank(selectedStmt.id, "interest")}
+                              className="gb hl"
+                            >
+                              <Plus size={12.5} />
+                              <span>Ghi nhận Lãi tiền gửi (TK 515)</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     )}
 
                     {/* Manual Candidate Search */}
-                    <div className="space-y-2 pt-1 border-t border-[var(--line)]">
-                      <div className="text-[11.5px] font-semibold text-[var(--text)]">Ghép thủ công với Hóa đơn / Giao dịch</div>
-                      <div className="relative">
+                    <div className="space-y-2 pt-2 border-t border-[var(--line)] flex-1 min-h-0 flex flex-col">
+                      <div className="text-[11.5px] font-semibold text-[var(--text)] shrink-0">Ghép thủ công với Hóa đơn / Giao dịch</div>
+                      <div className="relative shrink-0">
                         <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--dim)]" />
                         <input
                           value={txMatchSearch}
@@ -728,7 +1021,7 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
                         />
                       </div>
 
-                      <div className="max-h-[260px] overflow-y-auto space-y-1.5">
+                      <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5">
                         {candidateInvoices.map((cand) => {
                           const cid = String(cand.id)
                           const isSame = selectedStmt.matchedTransactionId === cid && selectedStmt.matchStatus === "matched"
@@ -767,6 +1060,94 @@ export function AccountingPage({ workspace, onToast }: AccountingProps) {
           </div>
         )}
       </div>
+
+      {/* Manual Journal Entry Modal */}
+      {showManualJeModal && (
+        <div
+          className="fixed inset-0 z-[110] grid place-items-center bg-black/45 p-4"
+          onClick={() => setShowManualJeModal(false)}
+        >
+          <form
+            onSubmit={handleCreateManualJe}
+            onClick={(e) => e.stopPropagation()}
+            className="glass-overlay w-full max-w-[460px] rounded-[16px] p-5 space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-[15px] font-bold">Lập Phiếu kế toán thủ công</h3>
+              <button type="button" onClick={() => setShowManualJeModal(false)}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[11px] text-[var(--muted)] mb-1">Số chứng từ (tùy chọn)</label>
+                <input
+                  placeholder="VD: PKT-2026-01"
+                  value={manualJe.voucherNo}
+                  onChange={(e) => setManualJe({ ...manualJe, voucherNo: e.target.value })}
+                  className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px] font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--muted)] mb-1">Ngày chứng từ</label>
+                <input
+                  required
+                  type="date"
+                  value={manualJe.voucherDate}
+                  onChange={(e) => setManualJe({ ...manualJe, voucherDate: e.target.value })}
+                  className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[11px] text-[var(--muted)] mb-1">Diễn giải</label>
+              <input
+                required
+                placeholder="VD: Bút toán điều chỉnh, kết chuyển, trích khấu hao..."
+                value={manualJe.description}
+                onChange={(e) => setManualJe({ ...manualJe, description: e.target.value })}
+                className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px]"
+              />
+            </div>
+            <div className="grid grid-cols-3 gap-2.5 items-end">
+              <div>
+                <label className="block text-[11px] text-[var(--muted)] mb-1">TK Nợ</label>
+                <input
+                  required
+                  value={manualJe.debitAccount}
+                  onChange={(e) => setManualJe({ ...manualJe, debitAccount: e.target.value })}
+                  className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px] font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--muted)] mb-1">TK Có</label>
+                <input
+                  required
+                  value={manualJe.creditAccount}
+                  onChange={(e) => setManualJe({ ...manualJe, creditAccount: e.target.value })}
+                  className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px] font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--muted)] mb-1">Số tiền (VND)</label>
+                <MoneyInput
+                  value={manualJe.amountVnd}
+                  onChange={(v) => setManualJe({ ...manualJe, amountVnd: v })}
+                  className="w-full h-9 px-3 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12.5px] font-semibold"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" onClick={() => setShowManualJeModal(false)} className="gb">
+                Hủy
+              </button>
+              <button type="submit" className="pb">
+                Ghi sổ Nhật ký
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }

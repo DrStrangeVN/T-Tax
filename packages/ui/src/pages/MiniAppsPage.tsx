@@ -10,6 +10,7 @@ import {
   type WorkspaceDTO
 } from "@t-tax/core/browser"
 import { useTransport, fileToPayload } from "../transport/client.js"
+import { MoneyInput } from "../components/MoneyInput.js"
 import { formatMoney } from "../utils/format.js"
 
 interface MiniAppsProps {
@@ -502,76 +503,135 @@ export function MiniAppsPage({ workspace, onRefreshCounts, onToast }: MiniAppsPr
                   </button>
                 </div>
 
-                {invData.items.map((it, idx) => (
-                  <div key={idx} className="grid grid-cols-12 gap-1.5 items-center">
-                    <input
-                      value={it.name}
-                      onChange={(e) => {
-                        const next = [...invData.items]
-                        next[idx] = { ...it, name: e.target.value }
-                        setInvData({ ...invData, items: next })
-                      }}
-                      className="col-span-5 h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
-                    />
-                    <input
-                      type="number"
-                      value={it.quantity}
-                      onChange={(e) => {
-                        const next = [...invData.items]
-                        next[idx] = { ...it, quantity: Number(e.target.value) || 1 }
-                        setInvData({ ...invData, items: next })
-                      }}
-                      className="col-span-2 h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
-                    />
-                    <input
-                      type="number"
-                      value={it.unitPrice}
-                      onChange={(e) => {
-                        const next = [...invData.items]
-                        next[idx] = { ...it, unitPrice: Number(e.target.value) || 0 }
-                        setInvData({ ...invData, items: next })
-                      }}
-                      className="col-span-3 h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
-                    />
-                    <select
-                      value={it.vatRate}
-                      onChange={(e) => {
-                        const next = [...invData.items]
-                        next[idx] = { ...it, vatRate: Number(e.target.value) }
-                        setInvData({ ...invData, items: next })
-                      }}
-                      className="col-span-1 h-8 px-1 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[11px] tnum"
-                    >
-                      {[0, 5, 8, 10].map((v) => (
-                        <option key={v} value={v} className="bg-[var(--panel-solid)]">{v}%</option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      disabled={invData.items.length <= 1}
-                      onClick={() =>
-                        setInvData({
-                          ...invData,
-                          items: invData.items.filter((_, i) => i !== idx)
-                        })
-                      }
-                      className="col-span-1 h-8 grid place-items-center text-[var(--rose)] disabled:opacity-30"
-                      title="Xóa dòng"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                ))}
+                {invData.items.map((it, idx) => {
+                  const preAmt = Math.round((Number(it.quantity) || 0) * (Number(it.unitPrice) || 0))
+                  const vatPct = Number(it.vatRate ?? 0)
+                  const totalLine = preAmt + Math.round((preAmt * vatPct) / 100)
+                  return (
+                    <div key={idx} className="p-2.5 rounded-[10px] border border-[var(--line)] bg-[var(--panel)] space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          value={it.name}
+                          placeholder="Tên hàng hóa / dịch vụ..."
+                          onChange={(e) => {
+                            const next = [...invData.items]
+                            next[idx] = { ...it, name: e.target.value }
+                            setInvData({ ...invData, items: next })
+                          }}
+                          className="flex-1 h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                        />
+                        <button
+                          type="button"
+                          disabled={invData.items.length <= 1}
+                          onClick={() =>
+                            setInvData({
+                              ...invData,
+                              items: invData.items.filter((_, i) => i !== idx)
+                            })
+                          }
+                          className="w-8 h-8 rounded-[8px] grid place-items-center text-[var(--rose)] hover:bg-[var(--rose-s)] disabled:opacity-30 shrink-0"
+                          title="Xóa dòng"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-12 gap-2 items-center">
+                        <div className="col-span-3">
+                          <label className="block text-[10px] text-[var(--dim)] mb-0.5">SL</label>
+                          <input
+                            type="number"
+                            value={it.quantity}
+                            onChange={(e) => {
+                              const next = [...invData.items]
+                              next[idx] = { ...it, quantity: Number(e.target.value) || 1 }
+                              setInvData({ ...invData, items: next })
+                            }}
+                            className="w-full h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px] tnum"
+                          />
+                        </div>
+                        <div className="col-span-6">
+                          <label className="block text-[10px] text-[var(--dim)] mb-0.5">Đơn giá</label>
+                          <MoneyInput
+                            value={it.unitPrice}
+                            onChange={(val) => {
+                              const next = [...invData.items]
+                              next[idx] = { ...it, unitPrice: val }
+                              setInvData({ ...invData, items: next })
+                            }}
+                            className="w-full h-8 px-2 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                          />
+                        </div>
+                        <div className="col-span-3">
+                          <label className="block text-[10px] text-[var(--dim)] mb-0.5">VAT %</label>
+                          <select
+                            value={it.vatRate}
+                            onChange={(e) => {
+                              const next = [...invData.items]
+                              next[idx] = { ...it, vatRate: Number(e.target.value) }
+                              setInvData({ ...invData, items: next })
+                            }}
+                            className="w-full h-8 px-1.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[11.5px] tnum"
+                          >
+                            {[0, 5, 8, 10].map((v) => (
+                              <option key={v} value={v} className="bg-[var(--panel-solid)]">{v}%</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between pt-0.5 text-[11px]">
+                        <span className="text-[var(--dim)]">Thành tiền sau VAT</span>
+                        <span className="font-semibold tnum text-[var(--cyan)]">
+                          {formatMoney(totalLine, invData.currency)}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
 
-              <button
-                type="button"
-                onClick={() => transport.savePdfFromHtml(`${invData.invoiceNumber}.pdf`, invHtml)}
-                className="pb"
-              >
-                <Download size={13.5} />
-                <span>Xuất PDF Hóa đơn</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => transport.savePdfFromHtml(`${invData.invoiceNumber}.pdf`, invHtml)}
+                  className="gb"
+                >
+                  <Download size={13.5} />
+                  <span>Xuất PDF Hóa đơn</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const preTax = invData.items.reduce((s, it) => s + Math.round((Number(it.quantity) || 0) * (Number(it.unitPrice) || 0)), 0)
+                    const vatAmt = invData.items.reduce(
+                      (s, it) =>
+                        s + Math.round(((Number(it.quantity) || 0) * (Number(it.unitPrice) || 0) * Number(it.vatRate ?? 0)) / 100),
+                      0
+                    )
+                    const buyerLine = invData.buyerDetails.split("\n")[0]?.trim() || "Khách hàng"
+                    await transport.createTransaction(workspace.id, {
+                      name: invData.items.map((x) => x.name).join(", ") || `Hóa đơn ${invData.invoiceNumber}`,
+                      merchant: buyerLine,
+                      direction: "output",
+                      preTaxAmount: preTax,
+                      vatAmount: vatAmt,
+                      totalAmount: preTax + vatAmt,
+                      currencyCode: invData.currency || workspace.baseCurrency,
+                      vatRateCode: `${invData.items[0]?.vatRate ?? 8}%`,
+                      invoiceNumber: invData.invoiceNumber,
+                      issuedAt: invData.issueDate,
+                      paymentMethod: "Chuyển khoản",
+                      paymentStatus: "unpaid"
+                    })
+                    onRefreshCounts()
+                    onToast(`Đã ghi nhận ${invData.invoiceNumber} vào Sổ Bán ra & định khoản Công nợ 131.`, "ok")
+                    await transport.savePdfFromHtml(`${invData.invoiceNumber}.pdf`, invHtml)
+                  }}
+                  className="pb"
+                >
+                  <FilePlus2 size={13.5} />
+                  <span>Lưu vào Sổ Bán ra & Xuất PDF</span>
+                </button>
+              </div>
             </div>
 
             <div className="lg:col-span-7">
