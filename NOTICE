@@ -1,0 +1,7 @@
+T-Tax includes domain concepts, data schemas, and self-hosted AI accounting workflows
+inspired by vas3k/TaxHacker (https://github.com/vas3k/TaxHacker), licensed under the MIT License.
+Copyright (c) 2025-2026 vas3k and TaxHacker contributors.
+
+Vietnam e-invoice XML structural semantics follow General Department of Taxation (GDT)
+Decisions 1450/QD-TCT and 1510/QD-TCT, Circular 78/2021/TT-BTC, Decree 70/2025/ND-CP,
+Circular 32/2025/TT-BTC, and Circular 99/2025/TT-BTC.

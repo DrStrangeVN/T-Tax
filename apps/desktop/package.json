@@ -1,0 +1,43 @@
+{
+  "name": "@t-tax/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "T-Tax — Vietnam AI Accounting & E-Invoice Desktop Suite (macOS & Windows)",
+  "author": "DR STRANGE",
+  "license": "MIT",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3,sharp,@napi-rs/canvas",
+    "dist:mac": "electron-builder --mac --config electron-builder.yml",
+    "dist:win": "electron-builder --win --config electron-builder.yml"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.2.0",
+    "@t-tax/core": "workspace:*",
+    "@t-tax/db": "workspace:*",
+    "@t-tax/ui": "workspace:*",
+    "better-sqlite3": "^13.2.0",
+    "drizzle-orm": "^0.45.4",
+    "lucide-react": "^1.78.0",
+    "pdfjs-dist": "^5.4.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.1",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "tailwindcss": "^4.3.5"
+  }
+}

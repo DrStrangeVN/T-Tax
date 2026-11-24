@@ -1,0 +1,193 @@
+:root {
+  color-scheme: dark;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-med: 180ms;
+  --dur-slow: 280ms;
+
+  /* Dark Mode — Minimal Specular Liquid Glass (Tahoe 26 Chrome-Only + Matte Inset Sheet) */
+  --wall-base: #0C0E14;
+  --outer-rail: #08090C;
+  --sheet-bg: #101217;
+  --bg: rgba(18, 20, 28, 0.52);
+  --side-bg: rgba(15, 17, 24, 0.72);
+  --panel: rgba(255, 255, 255, 0.038);
+  --panel-solid: #141720;
+  --menu-bg: rgba(22, 25, 35, 0.95);
+  --raised: rgba(255, 255, 255, 0.06);
+  --hover: rgba(255, 255, 255, 0.045);
+  --sel: rgba(255, 255, 255, 0.09);
+  --line: rgba(255, 255, 255, 0.085);
+  --line2: rgba(255, 255, 255, 0.15);
+  --specular: inset 0 0.5px 0 rgba(255, 255, 255, 0.14);
+  --specular-subtle: inset 0 0.5px 0 rgba(255, 255, 255, 0.09);
+  --glass-blur: blur(22px) saturate(135%);
+  --text: #F3F5F9;
+  --muted: #A7B0C5;
+  --dim: #7E879D;
+
+  /* Accent & Semantic Status */
+  --accent: #2563EB;
+  --accent-border: rgba(255, 255, 255, 0.18);
+  --accent-shadow: 0 2px 6px rgba(37, 99, 235, 0.22);
+  --green: #34D399;
+  --green-s: rgba(52, 211, 153, 0.12);
+  --indigo: #A78BFA;
+  --indigo-s: rgba(167, 139, 250, 0.12);
+  --amber: #FBBF24;
+  --amber-s: rgba(251, 191, 36, 0.12);
+  --cyan: #38BDF8;
+  --cyan-s: rgba(56, 189, 248, 0.12);
+  --rose: #FB7185;
+  --rose-s: rgba(251, 113, 133, 0.12);
+  --pink: #F472B6;
+  --pink-s: rgba(244, 114, 182, 0.12);
+  --red: var(--rose);
+  --emerald: var(--green);
+
+  /* Elevation & Specular Depth */
+  --track: rgba(255, 255, 255, 0.08);
+  --pop: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 18px 48px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.12);
+  --card-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.10), 0 2px 8px rgba(0, 0, 0, 0.14);
+  --card-shadow-hover: inset 0 0.5px 0 rgba(255, 255, 255, 0.16), 0 6px 16px rgba(0, 0, 0, 0.20);
+}
+
+html.light,
+body.light {
+  color-scheme: light;
+  --wall-base: #F4F5F8;
+  --outer-rail: #EFF1F5;
+  --sheet-bg: #FFFFFF;
+  --bg: rgba(244, 245, 248, 0.90);
+  --side-bg: rgba(247, 248, 252, 0.86);
+  --panel: rgba(255, 255, 255, 0.86);
+  --panel-solid: #FFFFFF;
+  --menu-bg: rgba(255, 255, 255, 0.96);
+  --raised: rgba(15, 23, 42, 0.04);
+  --hover: rgba(15, 23, 42, 0.03);
+  --sel: rgba(15, 23, 42, 0.065);
+  --line: rgba(15, 23, 42, 0.08);
+  --line2: rgba(15, 23, 42, 0.14);
+  --specular: inset 0 1px 0 rgba(255, 255, 255, 0.96);
+  --specular-subtle: inset 0 0.5px 0 rgba(255, 255, 255, 0.85);
+  --glass-blur: blur(22px) saturate(135%);
+  --text: #141622;
+  --muted: #474D61;
+  --dim: #646B80;
+
+  --accent: #0071E3;
+  --accent-border: rgba(0, 113, 227, 0.32);
+  --accent-shadow: 0 2px 6px rgba(0, 113, 227, 0.16);
+  --green: #059669;
+  --green-s: rgba(5, 150, 105, 0.10);
+  --indigo: #6D28D9;
+  --indigo-s: rgba(109, 40, 217, 0.09);
+  --amber: #B45309;
+  --amber-s: rgba(180, 83, 9, 0.10);
+  --cyan: #0284C7;
+  --cyan-s: rgba(2, 132, 199, 0.10);
+  --rose: #E11D48;
+  --rose-s: rgba(225, 29, 72, 0.09);
+  --pink: #DB2777;
+  --pink-s: rgba(219, 39, 119, 0.10);
+  --red: var(--rose);
+  --emerald: var(--green);
+
+  --track: rgba(15, 23, 42, 0.07);
+  --pop: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 16px 40px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(15, 23, 42, 0.07);
+  --card-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.96), 0 1px 4px rgba(15, 23, 42, 0.04);
+  --card-shadow-hover: inset 0 0.5px 0 #FFFFFF, 0 4px 12px rgba(15, 23, 42, 0.07);
+}
+
+/* Glass Intensity Variants */
+body.glass-clear {
+  --bg: rgba(18, 20, 28, 0.36);
+  --side-bg: rgba(15, 17, 24, 0.52);
+  --panel: rgba(255, 255, 255, 0.025);
+  --sheet-bg: rgba(16, 18, 23, 0.86);
+}
+body.light.glass-clear {
+  --bg: rgba(244, 245, 248, 0.68);
+  --side-bg: rgba(255, 255, 255, 0.54);
+  --panel: rgba(255, 255, 255, 0.64);
+  --sheet-bg: rgba(255, 255, 255, 0.92);
+}
+
+body.glass-solid {
+  --bg: rgba(18, 20, 28, 0.88);
+  --side-bg: rgba(15, 17, 24, 0.92);
+  --panel: rgba(255, 255, 255, 0.065);
+  --sheet-bg: #101217;
+}
+body.light.glass-solid {
+  --bg: rgba(244, 245, 248, 0.96);
+  --side-bg: #FFFFFF;
+  --panel: #FFFFFF;
+  --sheet-bg: #FFFFFF;
+}
+
+/* Accessibility Fallbacks */
+body.reduce-transparency {
+  --bg: #0D0E15 !important;
+  --side-bg: #161926 !important;
+  --sheet-bg: #101217 !important;
+  --panel: #1A1D2E !important;
+  --menu-bg: #1A1D2E !important;
+  --raised: #22263C !important;
+  --glass-blur: none !important;
+  --card-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  --card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.45);
+}
+body.light.reduce-transparency {
+  --bg: #F6F7FB !important;
+  --side-bg: #FFFFFF !important;
+  --sheet-bg: #FFFFFF !important;
+  --panel: #FFFFFF !important;
+  --menu-bg: #FFFFFF !important;
+  --raised: #EFF1F5 !important;
+  --glass-blur: none !important;
+  --card-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+  --card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.10);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --bg: #0D0E15 !important;
+    --side-bg: #161926 !important;
+    --sheet-bg: #101217 !important;
+    --panel: #1A1D2E !important;
+    --menu-bg: #1A1D2E !important;
+    --raised: #22263C !important;
+    --glass-blur: none !important;
+  }
+  body.light {
+    --bg: #F6F7FB !important;
+    --side-bg: #FFFFFF !important;
+    --sheet-bg: #FFFFFF !important;
+    --panel: #FFFFFF !important;
+    --menu-bg: #FFFFFF !important;
+    --raised: #EFF1F5 !important;
+    --glass-blur: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root,
+  body.light {
+    --panel: var(--panel-solid);
+    --side-bg: var(--panel-solid);
+    --menu-bg: var(--panel-solid);
+    --bg: var(--panel-solid);
+  }
+}

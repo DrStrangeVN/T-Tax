@@ -1,0 +1,156 @@
+import { test, expect, _electron as electron } from "@playwright/test"
+import { mkdtempSync, rmSync, mkdirSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
+
+const SAMPLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<HDon>
+  <DLHDon>
+    <TTChung>
+      <THDon>HÓA ĐƠN GIÁ TRỊ GIA TĂNG</THDon>
+      <KHMSHDon>1</KHMSHDon>
+      <KHHDon>C26TAA</KHHDon>
+      <SHDon>00004321</SHDon>
+      <NLap>2026-07-01</NLap>
+      <DVTTe>VND</DVTTe>
+      <TGia>1</TGia>
+      <HTTToan>Chuyển khoản</HTTToan>
+    </TTChung>
+    <NDHDon>
+      <NBan>
+        <Ten>CÔNG TY TNHH DỊCH VỤ PHẦN MỀM VN</Ten>
+        <MST>0312000111</MST>
+        <DChi>Quận 3, TP.HCM</DChi>
+      </NBan>
+      <NMua>
+        <Ten>Công ty TNHH T-Tax Demo</Ten>
+        <MST>0312345678</MST>
+      </NMua>
+      <DSHHDVu>
+        <HHDVu>
+          <STT>1</STT>
+          <THHDVu>Thuê bản quyền T-Tax Enterprise</THHDVu>
+          <DVTinh>Năm</DVTinh>
+          <SLuong>1</SLuong>
+          <DGia>12000000</DGia>
+          <ThTien>12000000</ThTien>
+          <TSuat>8%</TSuat>
+        </HHDVu>
+      </DSHHDVu>
+      <TToan>
+        <THTTLTSuat>
+          <LTSuat>
+            <TSuat>8%</TSuat>
+            <ThTien>12000000</ThTien>
+            <TThue>960000</TThue>
+          </LTSuat>
+        </THTTLTSuat>
+        <TgTCThue>12000000</TgTCThue>
+        <TgTThue>960000</TgTThue>
+        <TgTTTBSo>12960000</TgTTTBSo>
+      </TToan>
+    </NDHDon>
+  </DLHDon>
+</HDon>`
+
+test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval & VAS Ledger", async () => {
+  const userDataDir = mkdtempSync(join(tmpdir(), "ttax-e2e-"))
+  const shotDir = process.env.TTAX_SHOT_DIR || join(userDataDir, "shots")
+  mkdirSync(shotDir, { recursive: true })
+
+  const app = await electron.launch({
+    args: [resolve("apps/desktop/out/main/index.js")],
+    env: {
+      ...process.env,
+      TTAX_USER_DATA_DIR: userDataDir
+    }
+  })
+
+  try {
+    // Wait for main window (exclude 364px tray popover)
+    let page = await app.firstWindow()
+    for (let i = 0; i < 15; i++) {
+      const wins = app.windows()
+      const mainWin = wins.find((w) => !w.url().includes("view=tray"))
+      if (mainWin) {
+        page = mainWin
+        break
+      }
+      await new Promise((r) => setTimeout(r, 200))
+    }
+
+    await page.waitForLoadState("domcontentloaded")
+    await page.waitForSelector(".ttax-shell", { timeout: 15_000 })
+
+    const pageErrors: string[] = []
+    page.on("pageerror", (err) => pageErrors.push(err.message))
+
+    // 1. Audit Liquid Glass rules on Dashboard (Dark Mode)
+    const audit = await page.evaluate(() => {
+      const bodyStyle = getComputedStyle(document.body)
+      const bgImg = bodyStyle.backgroundImage
+      const overflow = document.documentElement.scrollWidth > document.documentElement.clientWidth
+      const hasTabular = bodyStyle.fontVariantNumeric.includes("tabular-nums")
+      return { bgImg, overflow, hasTabular }
+    })
+    expect(audit.bgImg).toBe("none")
+    expect(audit.overflow).toBe(false)
+    expect(audit.hasTabular).toBe(true)
+
+    await page.screenshot({ path: join(shotDir, "01-dashboard-dark.png") })
+
+    // 2. Test Command Palette (⌘K / Ctrl+K)
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k")
+    await expect(page.locator(".pal")).toBeVisible()
+    await page.screenshot({ path: join(shotDir, "02-command-palette.png") })
+    await page.keyboard.press("Escape")
+
+    // 3. Test Sidebar Collapse (⌘\)
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+\\" : "Control+\\")
+    await expect(page.locator("body")).toHaveClass(/sb-off/)
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+\\" : "Control+\\")
+    await expect(page.locator("body")).not.toHaveClass(/sb-off/)
+
+    // 4. Navigate to Unsorted Inbox & upload XML via transport/file input
+    await page.click('[data-nav="unsorted"]')
+    const fileInput = page.locator('input[type="file"][accept*=".xml"]').last()
+    await fileInput.setInputFiles({
+      name: "HD_00004321.xml",
+      mimeType: "application/xml",
+      buffer: Buffer.from(SAMPLE_XML, "utf8")
+    })
+
+    await expect(page.locator("text=HD_00004321.xml").first()).toBeVisible({ timeout: 10_000 })
+    await page.click('button:has-text("Bóc tách ngay")')
+    await expect(page.locator("text=XML 100%").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "03-unsorted-xml-review.png") })
+
+    // Approve & auto-post
+    await page.click('button:has-text("Duyệt & Ghi sổ")')
+    await expect(page.locator("text=Hộp thư chứng từ đang sạch")).toBeVisible({ timeout: 10_000 })
+
+    // 5. Verify Transaction Ledger
+    await page.click('[data-nav="transactions"]')
+    await expect(page.locator("text=00004321")).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator("text=0312000111")).toBeVisible()
+    await page.screenshot({ path: join(shotDir, "04-transactions-ledger.png") })
+
+    // 6. Verify Accounting VAS Journal Entry created automatically
+    await page.click('[data-nav="accounting"]')
+    await expect(page.locator("h1")).toContainText("Kế toán", { timeout: 10_000 })
+    await expect(page.locator('input[value="1331"]').first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "05-accounting-vas.png") })
+
+    // 7. Toggle Light Mode & verify clean Light Liquid Glass
+    await page.click('[title="Đổi Sáng / Tối"]')
+    await expect(page.locator("body")).toHaveClass(/light/)
+    await page.click('[data-nav="dashboard"]')
+    await page.waitForTimeout(300)
+    await page.screenshot({ path: join(shotDir, "06-dashboard-light.png") })
+
+    expect(pageErrors).toEqual([])
+  } finally {
+    await app.close()
+    rmSync(userDataDir, { recursive: true, force: true })
+  }
+})

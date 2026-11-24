@@ -1,0 +1,14 @@
+services:
+  t-tax:
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "7331:7331"
+    environment:
+      - PORT=7331
+      - TTAX_DATA_DIR=/app/data
+      - TTAX_SECRET=${TTAX_SECRET:-change-me-in-production-32-chars}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

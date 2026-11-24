@@ -1,0 +1,18 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+allowBuilds:
+  better-sqlite3: true
+  electron: true
+  sharp: true
+  "@napi-rs/canvas": true
+  electron-winstaller: true
+  esbuild: true
+minimumReleaseAgeExclude:
+  - "@ai-sdk/gateway@4.0.154"
+  - "@ai-sdk/google@4.0.125"
+  - ai@7.0.181
+  - hono@4.13.21
+  - lucide-react@1.78.0
+  - node-forge@1.4.4
+  - recharts@3.11.1

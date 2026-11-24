@@ -1,0 +1,70 @@
+appId: vn.drstrange.ttax
+productName: T-Tax
+copyright: Copyright © 2026 DR STRANGE
+directories:
+  output: ../../release
+  buildResources: resources
+files:
+  - out/**/*
+  - resources/**/*
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!**/node_modules/*.d.ts"
+  - "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}"
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/better-sqlite3/**"
+  - "node_modules/sharp/**"
+  - "node_modules/@img/**"
+  - "node_modules/@napi-rs/**"
+  - "node_modules/pdfjs-dist/**"
+npmRebuild: true
+mac:
+  category: public.app-category.finance
+  icon: resources/icon.icns
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+dmg:
+  title: T-Tax ${version}
+  window:
+    width: 560
+    height: 380
+  contents:
+    - x: 145
+      y: 190
+    - x: 415
+      y: 190
+      type: link
+      path: /Applications
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: T-Tax
+publish:
+  provider: github
+  owner: DrStrangeVN
+  repo: T-Tax
