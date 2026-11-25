@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { openTTaxDatabase, TTaxService, VaultStorage } from "@t-tax/db"
+import { TTaxLocalMcpHttpHost } from "@t-tax/mcp"
 import { createMainWindow } from "./window-main.js"
 import { createTrayController, type TrayController } from "./window-tray.js"
 import { registerIpcHandlers } from "./ipc.js"
@@ -86,6 +87,12 @@ app.whenReady().then(() => {
   const defaultWs = service.ensureWorkspace()
   let activeWorkspaceId = defaultWs.id
   const secrets = new SecretVault(userDataDir)
+  const savedMcpToken = service.getAppData<{ bearerToken?: string }>(defaultWs.id, "mcp_host")?.bearerToken
+  const mcpHost = new TTaxLocalMcpHttpHost(service, savedMcpToken)
+  mcpHost.setDefaultWorkspaceId(activeWorkspaceId)
+  if (!savedMcpToken) {
+    service.saveAppData(defaultWs.id, "mcp_host", { bearerToken: mcpHost.getStatus().bearerToken })
+  }
 
   protocol.handle("ttax-vault", async (req) => {
     try {
@@ -145,10 +152,12 @@ app.whenReady().then(() => {
   registerIpcHandlers({
     service,
     secrets,
+    mcpHost,
     getMainWindow: () => mainWindow,
     onCountsChanged: refreshTrayCount,
     onWorkspaceChanged: (wsId) => {
       activeWorkspaceId = wsId
+      mcpHost.setDefaultWorkspaceId(wsId)
       refreshTrayCount()
     }
   })
@@ -189,6 +198,7 @@ app.whenReady().then(() => {
 
   app.on("before-quit", () => {
     if (emailSyncTimer) clearInterval(emailSyncTimer)
+    void mcpHost.stop()
     trayCtrl?.destroy()
     conn.close()
   })

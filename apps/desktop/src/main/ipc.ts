@@ -22,6 +22,17 @@ import {
   type XmlSignatureVerification
 } from "@t-tax/core"
 import type { TTaxService } from "@t-tax/db"
+import {
+  buildCopilotExternalMcpTools,
+  callExternalMcpTool,
+  invokeBuiltInMcpTool,
+  testExternalMcpServer,
+  TTAX_MCP_PROMPTS_CATALOG,
+  TTAX_MCP_RESOURCES_CATALOG,
+  TTAX_MCP_TOOL_CATALOG,
+  TTAX_MCP_VERSION,
+  type TTaxLocalMcpHttpHost
+} from "@t-tax/mcp"
 import type { SecretVault } from "./secrets.js"
 
 async function renderHtmlListToPdfBuffers(htmlList: string[]): Promise<Buffer[]> {
@@ -62,13 +73,14 @@ let batchCancelled = false
 export function registerIpcHandlers(params: {
   service: TTaxService
   secrets: SecretVault
+  mcpHost: TTaxLocalMcpHttpHost
   getMainWindow: () => BrowserWindow | null
   onCountsChanged: () => void
   onWorkspaceChanged?: (workspaceId: string) => void
   onBeforeDbRestore?: () => void
   onAfterDbRestore?: () => void
 }) {
-  const { service, secrets } = params
+  const { service, secrets, mcpHost } = params
 
   const getDecryptedProviders = (workspaceId: string): LLMProviderConfig[] => {
     const data = service.getAppData<{ providers?: LLMProviderConfig[] }>(workspaceId, "llm_providers")
@@ -578,6 +590,120 @@ export function registerIpcHandlers(params: {
         params.onCountsChanged()
         return res
       }
+
+      // Round 4: AI Copilot, Tax Audit, Cashflow Forecast, AR/AP Aging, Fixed Assets, Smart Rules & MCP Hub
+      case "runTaxAudit":
+        return service.runTaxAudit(args[0] as string)
+      case "getCashflowAnalytics":
+        return service.getCashflowAnalytics(args[0] as string, args[1] as number | undefined)
+      case "getArApAging":
+        return service.getArApAging(args[0] as string, args[1] as string | undefined)
+      case "exportArApAgingExcel": {
+        const res = await service.exportArApAgingExcel(args[0] as string, args[1] as string | undefined)
+        const saveRes = await dialog.showSaveDialog({
+          defaultPath: join(app.getPath("downloads"), safeAsciiFilename(res.filename))
+        })
+        if (saveRes.canceled || !saveRes.filePath) return { canceled: true }
+        await writeFile(saveRes.filePath, res.buffer)
+        return { savedPath: saveRes.filePath }
+      }
+      case "listSmartRules":
+        return service.listSmartRules(args[0] as string)
+      case "upsertSmartRule":
+        return service.upsertSmartRule(args[0] as string, args[1] as never)
+      case "deleteSmartRule":
+        return service.deleteSmartRule(args[0] as string, args[1] as string)
+      case "proposeSmartRules":
+        return service.proposeSmartRules(args[0] as string)
+      case "applySmartRulesToLedger": {
+        const res = service.applySmartRulesToLedger(args[0] as string)
+        params.onCountsChanged()
+        return res
+      }
+      case "listFixedAssets":
+        return service.listFixedAssets(args[0] as string)
+      case "createFixedAsset":
+        return service.createFixedAsset(args[0] as string, args[1] as never)
+      case "deleteFixedAsset":
+        return service.deleteFixedAsset(args[0] as string, args[1] as string)
+      case "runMonthlyDepreciation": {
+        const res = service.runMonthlyDepreciation(args[0] as string, args[1] as string)
+        params.onCountsChanged()
+        return res
+      }
+      case "listAiSessions":
+        return service.listAiSessions(args[0] as string)
+      case "listAiMessages":
+        return service.listAiMessages(args[0] as string)
+      case "deleteAiSession":
+        return service.deleteAiSession(args[0] as string, args[1] as string)
+      case "chatWithCopilot": {
+        const wsId = args[0] as string
+        const payload = args[1] as { sessionId?: string; prompt: string }
+        const providers = getDecryptedProviders(wsId)
+        const externalServers = service.listExternalMcpServers(wsId)
+        const externalMcpTools = buildCopilotExternalMcpTools(externalServers)
+        return service.chatWithCopilot(wsId, {
+          sessionId: payload.sessionId,
+          prompt: payload.prompt,
+          providers,
+          externalMcpTools
+        })
+      }
+      case "getMcpCatalog":
+        return {
+          version: TTAX_MCP_VERSION,
+          tools: TTAX_MCP_TOOL_CATALOG,
+          resources: TTAX_MCP_RESOURCES_CATALOG,
+          prompts: TTAX_MCP_PROMPTS_CATALOG,
+          stdioCliHint: `TTAX_DATA_DIR="${app.getPath("userData")}" npx t-tax-mcp`
+        }
+      case "getMcpHostStatus":
+        return mcpHost.getStatus()
+      case "startMcpHost":
+        return mcpHost.start(args[0] as number | undefined)
+      case "stopMcpHost":
+        return mcpHost.stop()
+      case "rotateMcpToken": {
+        const token = mcpHost.rotateToken()
+        const ws = service.ensureWorkspace()
+        service.saveAppData(ws.id, "mcp_host", { bearerToken: token })
+        if (mcpHost.getStatus().running) {
+          const port = mcpHost.getStatus().port
+          await mcpHost.stop()
+          return mcpHost.start(port)
+        }
+        return mcpHost.getStatus()
+      }
+      case "invokeBuiltInMcpTool":
+        return invokeBuiltInMcpTool(
+          service,
+          args[0] as string,
+          args[1] as string,
+          (args[2] as Record<string, unknown>) ?? {}
+        )
+      case "listExternalMcpServers":
+        return service.listExternalMcpServers(args[0] as string)
+      case "saveExternalMcpServer":
+        return service.saveExternalMcpServer(args[0] as string, args[1] as never)
+      case "deleteExternalMcpServer":
+        return service.deleteExternalMcpServer(args[0] as string, args[1] as string)
+      case "testExternalMcpServer": {
+        const wsId = args[0] as string
+        const cfg = args[1] as Parameters<typeof testExternalMcpServer>[0]
+        const res = await testExternalMcpServer(cfg)
+        if (cfg.id) {
+          service.saveExternalMcpServer(wsId, {
+            ...cfg,
+            cachedTools: res.ok ? res.tools : cfg.cachedTools,
+            lastConnectedAt: res.ok ? new Date().toISOString() : cfg.lastConnectedAt,
+            lastError: res.ok ? undefined : res.message
+          })
+        }
+        return res
+      }
+      case "callExternalMcpTool":
+        return callExternalMcpTool(args[0] as never, args[1] as string, (args[2] as Record<string, unknown>) ?? {})
 
       default:
         throw new Error(`Unknown IPC method: ${method}`)

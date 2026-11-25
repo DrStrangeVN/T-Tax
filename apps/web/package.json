@@ -13,6 +13,7 @@
     "@hono/node-server": "^1.19.14",
     "@t-tax/core": "workspace:*",
     "@t-tax/db": "workspace:*",
+    "@t-tax/mcp": "workspace:*",
     "@t-tax/ui": "workspace:*",
     "better-sqlite3": "^13.2.0",
     "hono": "^4.13.21",

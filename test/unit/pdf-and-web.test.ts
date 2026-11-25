@@ -172,6 +172,28 @@ describe("PDF Renderer (Zero Ghostscript), Tabular Import & Web Hono API", () =>
       })
       expect(ledgerExp.status).toBe(200)
       expect((await ledgerExp.arrayBuffer()).byteLength).toBeGreaterThan(1000)
+
+      // Streamable HTTP MCP v2 endpoint (/mcp) mounted on Web Hono server
+      const mcpInit = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "web-test", version: "1.0.0" }
+          }
+        })
+      })
+      expect(mcpInit.status).toBe(200)
+      const mcpBody = await mcpInit.text()
+      expect(mcpBody).toContain("t-tax-mcp-server")
     } finally {
       closeWebServer()
       rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })

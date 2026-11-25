@@ -191,7 +191,8 @@ export const transactions = sqliteTable(
     index("tx_ws_compliance_idx").on(t.workspaceId, t.complianceStatus),
     index("tx_ws_cat_idx").on(t.workspaceId, t.categoryCode),
     index("tx_ws_proj_idx").on(t.workspaceId, t.projectCode),
-    index("tx_ws_mst_idx").on(t.workspaceId, t.merchantTaxCode)
+    index("tx_ws_mst_idx").on(t.workspaceId, t.merchantTaxCode),
+    index("tx_ws_payment_idx").on(t.workspaceId, t.paymentStatus, t.direction, t.issuedAt)
   ]
 )
 
@@ -446,3 +447,86 @@ export const legalRulesCache = sqliteTable("legal_rules_cache", {
   payloadJson: text("payload_json").notNull(),
   updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
 })
+
+export const smartRules = sqliteTable(
+  "smart_rules",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    priority: integer("priority").notNull().default(100),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    matchField: text("match_field").notNull().default("any"),
+    matchType: text("match_type").notNull().default("contains"),
+    pattern: text("pattern").notNull(),
+    direction: text("direction").notNull().default("all"),
+    assignCategoryCode: text("assign_category_code"),
+    assignDebitAccount: text("assign_debit_account"),
+    assignCreditAccount: text("assign_credit_account"),
+    assignProjectCode: text("assign_project_code"),
+    taxDeductible: integer("tax_deductible", { mode: "boolean" }),
+    hitCount: integer("hit_count").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
+  },
+  (t) => [index("sr_ws_prio_idx").on(t.workspaceId, t.priority)]
+)
+
+export const fixedAssets = sqliteTable(
+  "fixed_assets",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    code: text("code").notNull(),
+    name: text("name").notNull(),
+    assetType: text("asset_type").notNull().default("tscd"),
+    purchaseDate: text("purchase_date").notNull(),
+    originalCostVnd: integer("original_cost_vnd").notNull().default(0),
+    residualValueVnd: integer("residual_value_vnd").notNull().default(0),
+    usefulLifeMonths: integer("useful_life_months").notNull().default(36),
+    accumulatedDepreciationVnd: integer("accumulated_depreciation_vnd").notNull().default(0),
+    assetAccount: text("asset_account").notNull().default("211"),
+    depreciationAccount: text("depreciation_account").notNull().default("214"),
+    expenseAccount: text("expense_account").notNull().default("6424"),
+    department: text("department"),
+    status: text("status").notNull().default("active"),
+    lastDepreciatedPeriod: text("last_depreciated_period"),
+    sourceTransactionId: text("source_transaction_id").references(() => transactions.id, { onDelete: "set null" }),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
+  },
+  (t) => [index("fa_ws_status_idx").on(t.workspaceId, t.status)]
+)
+
+export const aiChatSessions = sqliteTable(
+  "ai_chat_sessions",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+    updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
+  },
+  (t) => [index("ai_sess_ws_upd_idx").on(t.workspaceId, t.updatedAt)]
+)
+
+export const aiChatMessages = sqliteTable(
+  "ai_chat_messages",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => aiChatSessions.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    toolTracesJson: text("tool_traces_json"),
+    actionsJson: text("actions_json"),
+    providerUsed: text("provider_used"),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`)
+  },
+  (t) => [index("ai_msg_sess_idx").on(t.sessionId, t.createdAt)]
+)

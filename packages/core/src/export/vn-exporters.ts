@@ -570,3 +570,45 @@ export async function exportBatchXmlExcelBuffer(params: {
   ws.columns = [{ width: 24 }, { width: 13 }, { width: 11 }, { width: 12 }, { width: 15 }, { width: 32 }, { width: 14 }, { width: 15 }, { width: 14 }, { width: 16 }, { width: 12 }, { width: 36 }]
   return Buffer.from(await wb.xlsx.writeBuffer())
 }
+
+export async function exportArApAgingExcelBuffer(params: {
+  workspaceName: string
+  workspaceTaxCode: string
+  report: {
+    asOfDate: string
+    rows: Array<{
+      name: string
+      taxCode: string
+      direction: "receivable" | "payable"
+      invoiceCount: number
+      oldestDate: string
+      buckets: { current0To30: number; days31To60: number; days61To90: number; over90: number; total: number }
+    }>
+  }
+}): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet("Cong no AR-AP")
+  ws.addRow([`ĐƠN VỊ: ${params.workspaceName}`, `MST: ${params.workspaceTaxCode}`]).font = { bold: true }
+  ws.addRow([`BÁO CÁO PHÂN TÍCH TUỔI NỢ CÔNG NỢ PHẢI THU / PHẢI TRẢ (TÍNH ĐẾN ${params.report.asOfDate})`]).font = { bold: true, size: 12 }
+  ws.addRow([])
+  const header = ws.addRow(["Loại công nợ", "MST", "Tên đối tác", "Số HĐ", "Ngày cũ nhất", "0–30 ngày", "31–60 ngày", "61–90 ngày", "Trên 90 ngày", "Tổng công nợ"])
+  styleHeaderRow(header)
+  for (const r of params.report.rows) {
+    const row = ws.addRow([
+      r.direction === "receivable" ? "Phải thu (131)" : "Phải trả (331)",
+      r.taxCode,
+      r.name,
+      r.invoiceCount,
+      r.oldestDate,
+      r.buckets.current0To30,
+      r.buckets.days31To60,
+      r.buckets.days61To90,
+      r.buckets.over90,
+      r.buckets.total
+    ])
+    setTextCell(row.getCell(2), r.taxCode)
+    for (const c of [6, 7, 8, 9, 10]) row.getCell(c).numFmt = "#,##0"
+  }
+  ws.columns = [{ width: 16 }, { width: 16 }, { width: 32 }, { width: 8 }, { width: 13 }, { width: 15 }, { width: 15 }, { width: 15 }, { width: 15 }, { width: 17 }]
+  return Buffer.from(await wb.xlsx.writeBuffer())
+}

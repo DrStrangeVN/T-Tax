@@ -2,17 +2,26 @@ import React, { createContext, useContext } from "react"
 import type {
   AccountLedgerRow,
   AccountingRegime,
+  AiCopilotMessage,
+  AiCopilotSession,
+  ArApAgingReport,
   AuditIssue,
   BatchAnalyzeProgressEvent,
+  CashflowAnalytics,
   DocumentAnalysisOutcome,
+  ExternalMcpServerConfig,
+  FixedAssetDTO,
   GdtCaptchaChallenge,
   GdtInvoiceSummary,
   HkdTaxSectorCode,
   LLMProviderConfig,
   LineItemDTO,
+  McpHostStatus,
   OpeningBalanceRow,
   OutgoingInvoiceTemplateData,
   ParsedEInvoice,
+  SmartRuleDTO,
+  TaxAuditReport,
   TransactionDirection,
   TrialBalanceRow,
   WorkspaceBadgeCounts,
@@ -239,6 +248,81 @@ export interface TTaxTransport {
   renderOutgoingInvoiceHtml: (data: OutgoingInvoiceTemplateData) => Promise<string>
   exportBackupZip: (workspaceId: string) => Promise<{ savedPath?: string; canceled?: boolean }>
   restoreBackupZip: () => Promise<{ workspaceId: string; restoredTransactions: number; restoredFiles: number } | { canceled: true }>
+
+  // Round 4: AI Copilot, Tax Risk Audit, Cashflow Forecast, AR/AP Aging, Fixed Assets, Smart Rules & MCP Hub
+  runTaxAudit: (workspaceId: string) => Promise<TaxAuditReport>
+  getCashflowAnalytics: (workspaceId: string, months?: number) => Promise<CashflowAnalytics>
+  getArApAging: (workspaceId: string, asOfDate?: string) => Promise<ArApAgingReport>
+  exportArApAgingExcel?: (workspaceId: string, asOfDate?: string) => Promise<{ savedPath?: string; canceled?: boolean }>
+  listSmartRules: (workspaceId: string) => Promise<SmartRuleDTO[]>
+  upsertSmartRule: (workspaceId: string, input: Record<string, unknown>) => Promise<SmartRuleDTO>
+  deleteSmartRule: (workspaceId: string, id: string) => Promise<boolean>
+  proposeSmartRules: (
+    workspaceId: string
+  ) => Promise<
+    Array<{
+      name: string
+      matchField: "merchantTaxCode" | "merchant"
+      pattern: string
+      direction: "input" | "output"
+      assignCategoryCode: string
+      occurrences: number
+    }>
+  >
+  applySmartRulesToLedger: (workspaceId: string) => Promise<{ updatedCount: number }>
+  listFixedAssets: (workspaceId: string) => Promise<FixedAssetDTO[]>
+  createFixedAsset: (workspaceId: string, input: Record<string, unknown>) => Promise<FixedAssetDTO>
+  deleteFixedAsset: (workspaceId: string, id: string) => Promise<boolean>
+  runMonthlyDepreciation: (
+    workspaceId: string,
+    periodYm: string
+  ) => Promise<{ postedCount: number; totalAmountVnd: number; voucherNo?: string }>
+  listAiSessions: (workspaceId: string) => Promise<AiCopilotSession[]>
+  listAiMessages: (sessionId: string) => Promise<AiCopilotMessage[]>
+  deleteAiSession: (workspaceId: string, sessionId: string) => Promise<boolean>
+  chatWithCopilot: (
+    workspaceId: string,
+    params: { sessionId?: string; prompt: string }
+  ) => Promise<{ session: AiCopilotSession; userMessage: AiCopilotMessage; assistantMessage: AiCopilotMessage }>
+  getMcpCatalog: () => Promise<{
+    version: string
+    tools: Array<{
+      name: string
+      title: string
+      description: string
+      readOnly: boolean
+      category: "read" | "analytics" | "write"
+      sampleArgs: Record<string, unknown>
+    }>
+    resources: Array<{ uri: string; title: string; mimeType: string }>
+    prompts: Array<{ name: string; title: string; description: string }>
+    stdioCliHint: string
+  }>
+  getMcpHostStatus: () => Promise<McpHostStatus>
+  startMcpHost: (port?: number) => Promise<McpHostStatus>
+  stopMcpHost: () => Promise<McpHostStatus>
+  rotateMcpToken: () => Promise<McpHostStatus>
+  invokeBuiltInMcpTool: (
+    workspaceId: string,
+    toolName: string,
+    args: Record<string, unknown>
+  ) => Promise<{ isError: boolean; text: string; structuredContent?: unknown; durationMs: number }>
+  listExternalMcpServers: (workspaceId: string) => Promise<ExternalMcpServerConfig[]>
+  saveExternalMcpServer: (workspaceId: string, cfg: ExternalMcpServerConfig) => Promise<ExternalMcpServerConfig[]>
+  deleteExternalMcpServer: (workspaceId: string, id: string) => Promise<ExternalMcpServerConfig[]>
+  testExternalMcpServer: (
+    workspaceId: string,
+    cfg: ExternalMcpServerConfig
+  ) => Promise<{
+    ok: boolean
+    tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>
+    message: string
+  }>
+  callExternalMcpTool: (
+    cfg: ExternalMcpServerConfig,
+    toolName: string,
+    args: Record<string, unknown>
+  ) => Promise<{ isError: boolean; text: string; structuredContent?: unknown }>
 }
 
 const TransportContext = createContext<TTaxTransport | null>(null)
@@ -460,6 +544,36 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
           }
         })
         input.click()
-      })
+      }),
+    runTaxAudit: (wsId) => post("/rpc", { method: "runTaxAudit", args: [wsId] }),
+    getCashflowAnalytics: (wsId, months) => post("/rpc", { method: "getCashflowAnalytics", args: [wsId, months] }),
+    getArApAging: (wsId, asOf) => post("/rpc", { method: "getArApAging", args: [wsId, asOf] }),
+    exportArApAgingExcel: (wsId, asOf) =>
+      downloadFile("/export-custom", { type: "aging", workspaceId: wsId, asOfDate: asOf }, "cong_no_ar_ap.xlsx"),
+    listSmartRules: (wsId) => post("/rpc", { method: "listSmartRules", args: [wsId] }),
+    upsertSmartRule: (wsId, inp) => post("/rpc", { method: "upsertSmartRule", args: [wsId, inp] }),
+    deleteSmartRule: (wsId, id) => post("/rpc", { method: "deleteSmartRule", args: [wsId, id] }),
+    proposeSmartRules: (wsId) => post("/rpc", { method: "proposeSmartRules", args: [wsId] }),
+    applySmartRulesToLedger: (wsId) => post("/rpc", { method: "applySmartRulesToLedger", args: [wsId] }),
+    listFixedAssets: (wsId) => post("/rpc", { method: "listFixedAssets", args: [wsId] }),
+    createFixedAsset: (wsId, inp) => post("/rpc", { method: "createFixedAsset", args: [wsId, inp] }),
+    deleteFixedAsset: (wsId, id) => post("/rpc", { method: "deleteFixedAsset", args: [wsId, id] }),
+    runMonthlyDepreciation: (wsId, ym) => post("/rpc", { method: "runMonthlyDepreciation", args: [wsId, ym] }),
+    listAiSessions: (wsId) => post("/rpc", { method: "listAiSessions", args: [wsId] }),
+    listAiMessages: (sid) => post("/rpc", { method: "listAiMessages", args: [sid] }),
+    deleteAiSession: (wsId, sid) => post("/rpc", { method: "deleteAiSession", args: [wsId, sid] }),
+    chatWithCopilot: (wsId, p) => post("/rpc", { method: "chatWithCopilot", args: [wsId, p] }),
+    getMcpCatalog: () => post("/rpc", { method: "getMcpCatalog", args: [] }),
+    getMcpHostStatus: () => post("/rpc", { method: "getMcpHostStatus", args: [] }),
+    startMcpHost: (port) => post("/rpc", { method: "startMcpHost", args: [port] }),
+    stopMcpHost: () => post("/rpc", { method: "stopMcpHost", args: [] }),
+    rotateMcpToken: () => post("/rpc", { method: "rotateMcpToken", args: [] }),
+    invokeBuiltInMcpTool: (wsId, toolName, args) =>
+      post("/rpc", { method: "invokeBuiltInMcpTool", args: [wsId, toolName, args] }),
+    listExternalMcpServers: (wsId) => post("/rpc", { method: "listExternalMcpServers", args: [wsId] }),
+    saveExternalMcpServer: (wsId, cfg) => post("/rpc", { method: "saveExternalMcpServer", args: [wsId, cfg] }),
+    deleteExternalMcpServer: (wsId, id) => post("/rpc", { method: "deleteExternalMcpServer", args: [wsId, id] }),
+    testExternalMcpServer: (wsId, cfg) => post("/rpc", { method: "testExternalMcpServer", args: [wsId, cfg] }),
+    callExternalMcpTool: (cfg, toolName, args) => post("/rpc", { method: "callExternalMcpTool", args: [cfg, toolName, args] })
   }
 }

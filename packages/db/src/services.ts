@@ -5,8 +5,11 @@ import {
   analyzeDocumentHybrid,
   applyColumnMapping,
   auditParsedEInvoice,
+  computeArApAging,
+  computeCashflowAnalytics,
   convertAmount,
   exportAccountLedgerExcelBuffer,
+  exportArApAgingExcelBuffer,
   exportBatchXmlExcelBuffer,
   exportFastBravoExcelBuffer,
   exportHkdBookExcelBuffer,
@@ -17,11 +20,15 @@ import {
   getHistoricalExchangeRate,
   lookupVietnamTaxCode,
   matchBankRowsToTransactions,
+  matchSmartRule,
   pairXmlAndPdfFiles,
   parseBankStatementBuffer,
   parseTabularBuffer,
+  proposeSmartRulesFromHistory,
   renderEInvoiceHtml,
   renderOutgoingInvoiceHtml,
+  runLedgerTaxAudit,
+  runTTaxCopilot,
   suggestJournalLines,
   syncEmailAttachments,
   unpackIngestBuffers,
@@ -29,13 +36,22 @@ import {
   verifyJournalBalance,
   type AccountLedgerRow,
   type AccountingRegime,
+  type AiCopilotAction,
+  type AiCopilotMessage,
+  type AiCopilotSession,
+  type AiCopilotToolTrace,
+  type ArApAgingReport,
   type AttachmentImageFormat,
   type AuditIssue,
   type BankDetails,
   type BankMatchItem,
   type BatchAnalyzeProgressEvent,
+  type CashflowAnalytics,
+  type CopilotExternalToolDef,
   type DocumentAnalysisOutcome,
   type ExportInvoiceRow,
+  type ExternalMcpServerConfig,
+  type FixedAssetDTO,
   type FxCacheAdapter,
   type HkdTaxSectorCode,
   type LLMProviderConfig,
@@ -43,7 +59,10 @@ import {
   type OpeningBalanceRow,
   type OutgoingInvoiceTemplateData,
   type ParsedEInvoice,
+  type SmartRuleDTO,
+  type TaxAuditReport,
   type TransactionDirection,
+  type WorkspaceDTO,
   type XmlSignatureVerification
 } from "@t-tax/core"
 import type Database from "better-sqlite3"
@@ -2991,6 +3010,668 @@ export class TTaxService {
 
   async restoreBackup(zipBuffer: Buffer) {
     return restoreWorkspaceBackupZip(this.db, this.vault, zipBuffer)
+  }
+
+  // =========================================================================
+  // ROUND 4: AI TAX AUDIT, CASHFLOW FORECAST, AR/AP AGING, FIXED ASSETS,
+  // SMART RULES, PERSISTENT AI COPILOT & EXTERNAL MCP REGISTRY
+  // =========================================================================
+
+  runTaxAudit(workspaceId: string): TaxAuditReport {
+    const txs = this.db
+      .select({
+        id: schema.transactions.id,
+        name: schema.transactions.name,
+        description: schema.transactions.description,
+        merchant: schema.transactions.merchant,
+        merchantTaxCode: schema.transactions.merchantTaxCode,
+        direction: schema.transactions.direction,
+        preTaxAmount: schema.transactions.preTaxAmount,
+        vatAmount: schema.transactions.vatAmount,
+        totalAmount: schema.transactions.totalAmount,
+        convertedTotalVnd: schema.transactions.convertedTotalVnd,
+        currencyCode: schema.transactions.currencyCode,
+        invoiceSymbol: schema.transactions.invoiceSymbol,
+        invoiceNumber: schema.transactions.invoiceNumber,
+        categoryCode: schema.transactions.categoryCode,
+        issuedAt: schema.transactions.issuedAt,
+        paymentMethod: schema.transactions.paymentMethod,
+        paymentStatus: schema.transactions.paymentStatus,
+        complianceStatus: schema.transactions.complianceStatus,
+        complianceIssuesJson: schema.transactions.complianceIssuesJson
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.workspaceId, workspaceId))
+      .all()
+
+    const cps = this.db
+      .select({
+        taxCode: schema.counterparties.taxCode,
+        name: schema.counterparties.name,
+        riskStatus: schema.counterparties.status
+      })
+      .from(schema.counterparties)
+      .where(eq(schema.counterparties.workspaceId, workspaceId))
+      .all()
+
+    return runLedgerTaxAudit({ transactions: txs, counterparties: cps })
+  }
+
+  getCashflowAnalytics(workspaceId: string, forecastMonthsCount = 6): CashflowAnalytics {
+    const dash = this.getDashboardStats(workspaceId)
+    const tb = this.getTrialBalance(workspaceId)
+    const currentCashVnd = tb
+      .filter((r) => r.code.startsWith("111") || r.code.startsWith("112"))
+      .reduce((s, r) => s + (r.closingDebit - r.closingCredit), 0)
+
+    const txs = this.db
+      .select({
+        id: schema.transactions.id,
+        name: schema.transactions.name,
+        merchant: schema.transactions.merchant,
+        merchantTaxCode: schema.transactions.merchantTaxCode,
+        direction: schema.transactions.direction,
+        preTaxAmount: schema.transactions.preTaxAmount,
+        vatAmount: schema.transactions.vatAmount,
+        totalAmount: schema.transactions.totalAmount,
+        convertedTotalVnd: schema.transactions.convertedTotalVnd,
+        categoryCode: schema.transactions.categoryCode,
+        issuedAt: schema.transactions.issuedAt
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.workspaceId, workspaceId))
+      .all()
+
+    return computeCashflowAnalytics({
+      currentCashVnd,
+      monthlySeries: dash.monthlySeries,
+      transactions: txs,
+      forecastMonthsCount
+    })
+  }
+
+  getArApAging(workspaceId: string, asOfDate?: string): ArApAgingReport {
+    const txs = this.db
+      .select({
+        id: schema.transactions.id,
+        name: schema.transactions.name,
+        merchant: schema.transactions.merchant,
+        merchantTaxCode: schema.transactions.merchantTaxCode,
+        direction: schema.transactions.direction,
+        preTaxAmount: schema.transactions.preTaxAmount,
+        vatAmount: schema.transactions.vatAmount,
+        totalAmount: schema.transactions.totalAmount,
+        convertedTotalVnd: schema.transactions.convertedTotalVnd,
+        issuedAt: schema.transactions.issuedAt,
+        paymentStatus: schema.transactions.paymentStatus
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.workspaceId, workspaceId))
+      .all()
+    return computeArApAging({ transactions: txs, asOfDate })
+  }
+
+  async exportArApAgingExcel(workspaceId: string, asOfDate?: string) {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) throw new Error("Workspace không tồn tại.")
+    const report = this.getArApAging(workspaceId, asOfDate)
+    return {
+      filename: `cong_no_ar_ap_${report.asOfDate}.xlsx`,
+      buffer: await exportArApAgingExcelBuffer({
+        workspaceName: ws.name,
+        workspaceTaxCode: ws.taxCode,
+        report
+      })
+    }
+  }
+
+  listSmartRules(workspaceId: string): SmartRuleDTO[] {
+    return this.db
+      .select()
+      .from(schema.smartRules)
+      .where(eq(schema.smartRules.workspaceId, workspaceId))
+      .orderBy(asc(schema.smartRules.priority), desc(schema.smartRules.createdAt))
+      .all()
+      .map((r) => ({
+        id: r.id,
+        workspaceId: r.workspaceId,
+        name: r.name,
+        priority: r.priority,
+        enabled: Boolean(r.enabled),
+        matchField: r.matchField as SmartRuleDTO["matchField"],
+        matchType: r.matchType as SmartRuleDTO["matchType"],
+        pattern: r.pattern,
+        direction: r.direction as SmartRuleDTO["direction"],
+        assignCategoryCode: r.assignCategoryCode,
+        assignDebitAccount: r.assignDebitAccount,
+        assignCreditAccount: r.assignCreditAccount,
+        assignProjectCode: r.assignProjectCode,
+        taxDeductible: r.taxDeductible,
+        hitCount: r.hitCount,
+        createdAt: r.createdAt
+      }))
+  }
+
+  upsertSmartRule(
+    workspaceId: string,
+    input: {
+      id?: string
+      name: string
+      priority?: number
+      enabled?: boolean
+      matchField?: SmartRuleDTO["matchField"]
+      matchType?: SmartRuleDTO["matchType"]
+      pattern: string
+      direction?: SmartRuleDTO["direction"]
+      assignCategoryCode?: string | null
+      assignDebitAccount?: string | null
+      assignCreditAccount?: string | null
+      assignProjectCode?: string | null
+      taxDeductible?: boolean | null
+    }
+  ): SmartRuleDTO {
+    if (!input.name.trim() || !input.pattern.trim()) {
+      throw new Error("Tên quy tắc và từ khóa khớp không được để trống.")
+    }
+    const id = input.id || randomUUID()
+    const existing = this.db
+      .select()
+      .from(schema.smartRules)
+      .where(and(eq(schema.smartRules.id, id), eq(schema.smartRules.workspaceId, workspaceId)))
+      .get()
+
+    const payload = {
+      name: input.name.trim(),
+      priority: Number.isFinite(input.priority) ? Number(input.priority) : 100,
+      enabled: input.enabled ?? true,
+      matchField: input.matchField ?? "any",
+      matchType: input.matchType ?? "contains",
+      pattern: input.pattern.trim(),
+      direction: input.direction ?? "all",
+      assignCategoryCode: input.assignCategoryCode || null,
+      assignDebitAccount: input.assignDebitAccount || null,
+      assignCreditAccount: input.assignCreditAccount || null,
+      assignProjectCode: input.assignProjectCode || null,
+      taxDeductible: input.taxDeductible ?? null
+    }
+
+    if (existing) {
+      this.db.update(schema.smartRules).set(payload).where(eq(schema.smartRules.id, id)).run()
+    } else {
+      this.db
+        .insert(schema.smartRules)
+        .values({ id, workspaceId, ...payload })
+        .run()
+    }
+    return this.listSmartRules(workspaceId).find((r) => r.id === id)!
+  }
+
+  deleteSmartRule(workspaceId: string, id: string): boolean {
+    this.db
+      .delete(schema.smartRules)
+      .where(and(eq(schema.smartRules.id, id), eq(schema.smartRules.workspaceId, workspaceId)))
+      .run()
+    return true
+  }
+
+  proposeSmartRules(workspaceId: string) {
+    const rules = this.listSmartRules(workspaceId)
+    const txs = this.db
+      .select({
+        id: schema.transactions.id,
+        name: schema.transactions.name,
+        merchant: schema.transactions.merchant,
+        merchantTaxCode: schema.transactions.merchantTaxCode,
+        direction: schema.transactions.direction,
+        preTaxAmount: schema.transactions.preTaxAmount,
+        vatAmount: schema.transactions.vatAmount,
+        totalAmount: schema.transactions.totalAmount,
+        categoryCode: schema.transactions.categoryCode
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.workspaceId, workspaceId))
+      .all()
+    return proposeSmartRulesFromHistory(txs, rules)
+  }
+
+  applySmartRulesToLedger(workspaceId: string): { updatedCount: number } {
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) return { updatedCount: 0 }
+    const rules = this.listSmartRules(workspaceId)
+    if (rules.length === 0) return { updatedCount: 0 }
+
+    const txs = this.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.workspaceId, workspaceId))
+      .all()
+
+    let updatedCount = 0
+    for (const tx of txs) {
+      if (ws.lockDate && tx.issuedAt && tx.issuedAt <= ws.lockDate) continue
+      const matched = matchSmartRule(rules, {
+        direction: tx.direction,
+        merchant: tx.merchant,
+        merchantTaxCode: tx.merchantTaxCode,
+        name: tx.name,
+        description: tx.description
+      })
+      if (!matched) continue
+
+      const nextCat = matched.assignCategoryCode || tx.categoryCode
+      const nextProj = matched.assignProjectCode || tx.projectCode
+      const changed = nextCat !== tx.categoryCode || nextProj !== tx.projectCode || Boolean(matched.assignDebitAccount)
+      if (!changed) continue
+
+      this.db.transaction((trx) => {
+        trx
+          .update(schema.transactions)
+          .set({
+            categoryCode: nextCat,
+            projectCode: nextProj,
+            updatedAt: new Date().toISOString()
+          })
+          .where(eq(schema.transactions.id, tx.id))
+          .run()
+
+        trx
+          .update(schema.smartRules)
+          .set({ hitCount: sql`${schema.smartRules.hitCount} + 1` })
+          .where(eq(schema.smartRules.id, matched.id))
+          .run()
+
+        // Repost auto journal entry if debit account or category updated
+        const autoEntries = trx
+          .select({ id: schema.journalEntries.id })
+          .from(schema.journalEntries)
+          .where(and(eq(schema.journalEntries.transactionId, tx.id), eq(schema.journalEntries.postedBy, "auto_rule")))
+          .all()
+        for (const ae of autoEntries) {
+          trx.delete(schema.journalEntries).where(eq(schema.journalEntries.id, ae.id)).run()
+        }
+        const fx = Number(tx.fxRateDecimal || "1") || 1
+        this.postAutoJournalInTx(trx, {
+          workspaceId,
+          transactionId: tx.id,
+          name: tx.name || tx.merchant || "Chứng từ",
+          regime: ws.accountingRegime as AccountingRegime,
+          direction: tx.direction as TransactionDirection,
+          preTaxAmount: Math.round(tx.preTaxAmount * fx),
+          vatAmount: Math.round(tx.vatAmount * fx),
+          totalAmount: tx.convertedTotalVnd ?? tx.totalAmount,
+          categoryCode: nextCat ?? undefined,
+          debitAccountOverride: matched.assignDebitAccount ?? undefined,
+          paymentMethod: tx.paymentMethod,
+          paymentStatus: tx.paymentStatus,
+          voucherDate: tx.issuedAt ?? new Date().toISOString().slice(0, 10),
+          invoiceNumber: tx.invoiceNumber ?? undefined,
+          merchant: tx.merchant ?? undefined,
+          merchantTaxCode: tx.merchantTaxCode ?? undefined
+        })
+      })
+      updatedCount += 1
+    }
+    return { updatedCount }
+  }
+
+  private mapFixedAssetRow(r: typeof schema.fixedAssets.$inferSelect): FixedAssetDTO {
+    const depreciable = Math.max(0, r.originalCostVnd - r.residualValueVnd)
+    const monthly = r.usefulLifeMonths > 0 ? Math.round(depreciable / r.usefulLifeMonths) : 0
+    const remaining = Math.max(0, r.originalCostVnd - r.accumulatedDepreciationVnd)
+    return {
+      id: r.id,
+      workspaceId: r.workspaceId,
+      code: r.code,
+      name: r.name,
+      assetType: r.assetType === "ccdc" ? "ccdc" : "tscd",
+      purchaseDate: r.purchaseDate,
+      originalCostVnd: r.originalCostVnd,
+      residualValueVnd: r.residualValueVnd,
+      usefulLifeMonths: r.usefulLifeMonths,
+      monthlyDepreciationVnd: monthly,
+      accumulatedDepreciationVnd: r.accumulatedDepreciationVnd,
+      remainingValueVnd: remaining,
+      assetAccount: r.assetAccount,
+      depreciationAccount: r.depreciationAccount,
+      expenseAccount: r.expenseAccount,
+      department: r.department,
+      status: r.status as FixedAssetDTO["status"],
+      lastDepreciatedPeriod: r.lastDepreciatedPeriod,
+      sourceTransactionId: r.sourceTransactionId,
+      createdAt: r.createdAt
+    }
+  }
+
+  listFixedAssets(workspaceId: string): FixedAssetDTO[] {
+    return this.db
+      .select()
+      .from(schema.fixedAssets)
+      .where(eq(schema.fixedAssets.workspaceId, workspaceId))
+      .orderBy(desc(schema.fixedAssets.purchaseDate), asc(schema.fixedAssets.code))
+      .all()
+      .map((r) => this.mapFixedAssetRow(r))
+  }
+
+  createFixedAsset(
+    workspaceId: string,
+    input: {
+      code?: string
+      name: string
+      assetType: "tscd" | "ccdc"
+      purchaseDate: string
+      originalCostVnd: number
+      residualValueVnd?: number
+      usefulLifeMonths: number
+      accumulatedDepreciationVnd?: number
+      assetAccount?: string
+      depreciationAccount?: string
+      expenseAccount?: string
+      department?: string
+      sourceTransactionId?: string
+    }
+  ): FixedAssetDTO {
+    if (!input.name.trim()) throw new Error("Tên tài sản / CCDC không được để trống.")
+    const cost = Math.max(0, Math.round(Number(input.originalCostVnd) || 0))
+    const life = Math.max(1, Math.round(Number(input.usefulLifeMonths) || 12))
+    const isCcdc = input.assetType === "ccdc"
+    const id = randomUUID()
+    const code = input.code?.trim() || `${isCcdc ? "CCDC" : "TSCD"}-${id.slice(0, 6).toUpperCase()}`
+    const accDep = Math.max(0, Math.min(cost, Math.round(Number(input.accumulatedDepreciationVnd) || 0)))
+    const status = accDep >= cost ? "fully_depreciated" : "active"
+
+    this.db
+      .insert(schema.fixedAssets)
+      .values({
+        id,
+        workspaceId,
+        code,
+        name: input.name.trim(),
+        assetType: input.assetType,
+        purchaseDate: input.purchaseDate || new Date().toISOString().slice(0, 10),
+        originalCostVnd: cost,
+        residualValueVnd: Math.max(0, Math.round(Number(input.residualValueVnd) || 0)),
+        usefulLifeMonths: life,
+        accumulatedDepreciationVnd: accDep,
+        assetAccount: input.assetAccount?.trim() || (isCcdc ? "242" : "211"),
+        depreciationAccount: input.depreciationAccount?.trim() || (isCcdc ? "242" : "214"),
+        expenseAccount: input.expenseAccount?.trim() || (isCcdc ? "6423" : "6424"),
+        department: input.department?.trim() || null,
+        status,
+        sourceTransactionId: input.sourceTransactionId || null
+      })
+      .run()
+
+    const row = this.db.select().from(schema.fixedAssets).where(eq(schema.fixedAssets.id, id)).get()!
+    return this.mapFixedAssetRow(row)
+  }
+
+  deleteFixedAsset(workspaceId: string, id: string): boolean {
+    this.db
+      .delete(schema.fixedAssets)
+      .where(and(eq(schema.fixedAssets.id, id), eq(schema.fixedAssets.workspaceId, workspaceId)))
+      .run()
+    return true
+  }
+
+  runMonthlyDepreciation(
+    workspaceId: string,
+    periodYm: string
+  ): { postedCount: number; totalAmountVnd: number; voucherNo?: string } {
+    if (!/^\d{4}-\d{2}$/.test(periodYm)) {
+      throw new Error("Kỳ trích khấu hao phải theo định dạng YYYY-MM (VD: 2026-11).")
+    }
+    const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
+    if (!ws) throw new Error("Workspace không tồn tại.")
+
+    const [yStr, mStr] = periodYm.split("-")
+    const lastDay = new Date(Number(yStr), Number(mStr), 0).getDate()
+    const voucherDate = `${periodYm}-${String(lastDay).padStart(2, "0")}`
+    this.assertNotLocked(ws.lockDate, voucherDate)
+
+    const assets = this.listFixedAssets(workspaceId).filter(
+      (a) =>
+        a.status === "active" &&
+        a.remainingValueVnd > a.residualValueVnd &&
+        a.purchaseDate.slice(0, 7) <= periodYm &&
+        a.lastDepreciatedPeriod !== periodYm
+    )
+    if (assets.length === 0) {
+      return { postedCount: 0, totalAmountVnd: 0 }
+    }
+
+    const lines: Array<{ debitAccount: string; creditAccount: string; amountVnd: number; description: string }> = []
+    const updates: Array<{ id: string; nextAcc: number; nextStatus: string }> = []
+    let totalAmountVnd = 0
+
+    for (const a of assets) {
+      const maxDep = Math.max(0, a.originalCostVnd - a.residualValueVnd - a.accumulatedDepreciationVnd)
+      const depAmt = Math.min(a.monthlyDepreciationVnd, maxDep)
+      if (depAmt <= 0) continue
+      const nextAcc = a.accumulatedDepreciationVnd + depAmt
+      const nextStatus = nextAcc >= a.originalCostVnd - a.residualValueVnd ? "fully_depreciated" : "active"
+      lines.push({
+        debitAccount: a.expenseAccount,
+        creditAccount: a.depreciationAccount,
+        amountVnd: depAmt,
+        description: `${a.assetType === "ccdc" ? "Phân bổ CCDC" : "Khấu hao TSCĐ"} ${a.code} — ${a.name} (kỳ ${periodYm})`
+      })
+      updates.push({ id: a.id, nextAcc, nextStatus })
+      totalAmountVnd += depAmt
+    }
+
+    if (lines.length === 0) return { postedCount: 0, totalAmountVnd: 0 }
+
+    const voucherNo = `KH-${periodYm.replace("-", "")}-${randomUUID().slice(0, 4).toUpperCase()}`
+    const entryId = randomUUID()
+
+    this.db.transaction((trx) => {
+      trx
+        .insert(schema.journalEntries)
+        .values({
+          id: entryId,
+          workspaceId,
+          transactionId: null,
+          voucherNo,
+          voucherDate,
+          description: `Trích khấu hao TSCĐ & phân bổ CCDC kỳ ${periodYm}`,
+          status: "posted",
+          postedBy: "depreciation_job"
+        })
+        .run()
+
+      for (const ln of lines) {
+        trx
+          .insert(schema.journalLines)
+          .values({
+            id: randomUUID(),
+            entryId,
+            debitAccount: ln.debitAccount,
+            creditAccount: ln.creditAccount,
+            amountVnd: ln.amountVnd,
+            description: ln.description
+          })
+          .run()
+      }
+
+      for (const u of updates) {
+        trx
+          .update(schema.fixedAssets)
+          .set({
+            accumulatedDepreciationVnd: u.nextAcc,
+            status: u.nextStatus,
+            lastDepreciatedPeriod: periodYm
+          })
+          .where(eq(schema.fixedAssets.id, u.id))
+          .run()
+      }
+    })
+
+    return { postedCount: updates.length, totalAmountVnd, voucherNo }
+  }
+
+  listAiSessions(workspaceId: string): AiCopilotSession[] {
+    return this.db
+      .select()
+      .from(schema.aiChatSessions)
+      .where(eq(schema.aiChatSessions.workspaceId, workspaceId))
+      .orderBy(desc(schema.aiChatSessions.updatedAt))
+      .limit(30)
+      .all()
+  }
+
+  listAiMessages(sessionId: string): AiCopilotMessage[] {
+    return this.db
+      .select()
+      .from(schema.aiChatMessages)
+      .where(eq(schema.aiChatMessages.sessionId, sessionId))
+      .orderBy(asc(schema.aiChatMessages.createdAt))
+      .all()
+      .map((m) => ({
+        id: m.id,
+        sessionId: m.sessionId,
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content,
+        toolTraces: m.toolTracesJson ? (JSON.parse(m.toolTracesJson) as AiCopilotToolTrace[]) : undefined,
+        actions: m.actionsJson ? (JSON.parse(m.actionsJson) as AiCopilotAction[]) : undefined,
+        providerUsed: m.providerUsed ?? undefined,
+        createdAt: m.createdAt
+      }))
+  }
+
+  deleteAiSession(workspaceId: string, sessionId: string): boolean {
+    this.db
+      .delete(schema.aiChatSessions)
+      .where(and(eq(schema.aiChatSessions.id, sessionId), eq(schema.aiChatSessions.workspaceId, workspaceId)))
+      .run()
+    return true
+  }
+
+  async chatWithCopilot(
+    workspaceId: string,
+    params: {
+      sessionId?: string
+      prompt: string
+      providers?: LLMProviderConfig[]
+      externalMcpTools?: CopilotExternalToolDef[]
+    }
+  ): Promise<{
+    session: AiCopilotSession
+    userMessage: AiCopilotMessage
+    assistantMessage: AiCopilotMessage
+  }> {
+    const ws = this.listWorkspaces().find((w) => w.id === workspaceId)
+    if (!ws) throw new Error("Workspace không tồn tại.")
+    const promptText = params.prompt.trim()
+    if (!promptText) throw new Error("Vui lòng nhập câu hỏi cho Trợ lý AI.")
+
+    const now = new Date().toISOString()
+    let session = params.sessionId
+      ? this.db
+          .select()
+          .from(schema.aiChatSessions)
+          .where(and(eq(schema.aiChatSessions.id, params.sessionId), eq(schema.aiChatSessions.workspaceId, workspaceId)))
+          .get()
+      : undefined
+
+    if (!session) {
+      const sid = randomUUID()
+      const title = promptText.slice(0, 64)
+      this.db
+        .insert(schema.aiChatSessions)
+        .values({ id: sid, workspaceId, title, createdAt: now, updatedAt: now })
+        .run()
+      session = { id: sid, workspaceId, title, createdAt: now, updatedAt: now }
+    } else {
+      this.db.update(schema.aiChatSessions).set({ updatedAt: now }).where(eq(schema.aiChatSessions.id, session.id)).run()
+      session = { ...session, updatedAt: now }
+    }
+
+    const priorMsgs = this.listAiMessages(session.id).map((m) => ({ role: m.role, content: m.content }))
+
+    const userMsgId = randomUUID()
+    const userTs = new Date().toISOString()
+    this.db
+      .insert(schema.aiChatMessages)
+      .values({ id: userMsgId, sessionId: session.id, role: "user", content: promptText, createdAt: userTs })
+      .run()
+
+    const aiOut = await runTTaxCopilot({
+      workspace: ws as unknown as WorkspaceDTO,
+      prompt: promptText,
+      history: priorMsgs,
+      providers: params.providers ?? [],
+      backend: {
+        getOverview: async (dateFrom, dateTo) => this.getDashboardStats(workspaceId, dateFrom, dateTo) as unknown as Record<string, unknown>,
+        searchTransactions: async (query, limit) => this.listTransactions(workspaceId, { search: query, limit: limit ?? 10 }) as unknown as Record<string, unknown>,
+        getTrialBalance: async (dateFrom, dateTo) => this.getTrialBalance(workspaceId, { dateFrom, dateTo }),
+        runTaxAudit: async () => this.runTaxAudit(workspaceId),
+        getCashflowForecast: async (months) => this.getCashflowAnalytics(workspaceId, months ?? 6),
+        getArApAging: async () => this.getArApAging(workspaceId),
+        listFixedAssets: async () => this.listFixedAssets(workspaceId),
+        listCounterparties: async () => this.listCounterparties(workspaceId) as unknown as Array<Record<string, unknown>>,
+        externalMcpTools: params.externalMcpTools
+      }
+    })
+
+    const asstMsgId = randomUUID()
+    const asstTs = new Date().toISOString()
+    this.db
+      .insert(schema.aiChatMessages)
+      .values({
+        id: asstMsgId,
+        sessionId: session.id,
+        role: "assistant",
+        content: aiOut.content,
+        toolTracesJson: JSON.stringify(aiOut.toolTraces),
+        actionsJson: JSON.stringify(aiOut.actions),
+        providerUsed: aiOut.providerUsed,
+        createdAt: asstTs
+      })
+      .run()
+
+    this.db.update(schema.aiChatSessions).set({ updatedAt: asstTs }).where(eq(schema.aiChatSessions.id, session.id)).run()
+
+    return {
+      session: { ...session, updatedAt: asstTs },
+      userMessage: {
+        id: userMsgId,
+        sessionId: session.id,
+        role: "user",
+        content: promptText,
+        createdAt: userTs
+      },
+      assistantMessage: {
+        id: asstMsgId,
+        sessionId: session.id,
+        role: "assistant",
+        content: aiOut.content,
+        toolTraces: aiOut.toolTraces,
+        actions: aiOut.actions,
+        providerUsed: aiOut.providerUsed,
+        createdAt: asstTs
+      }
+    }
+  }
+
+  listExternalMcpServers(workspaceId: string): ExternalMcpServerConfig[] {
+    const data = this.getAppData<{ servers?: ExternalMcpServerConfig[] }>(workspaceId, "mcp_servers")
+    return Array.isArray(data.servers) ? data.servers : []
+  }
+
+  saveExternalMcpServer(workspaceId: string, cfg: ExternalMcpServerConfig): ExternalMcpServerConfig[] {
+    const curr = this.listExternalMcpServers(workspaceId)
+    const id = cfg.id || randomUUID()
+    const nextItem: ExternalMcpServerConfig = { ...cfg, id }
+    const idx = curr.findIndex((s) => s.id === id)
+    const next = idx >= 0 ? curr.map((s, i) => (i === idx ? nextItem : s)) : [...curr, nextItem]
+    this.saveAppData(workspaceId, "mcp_servers", { servers: next })
+    return next
+  }
+
+  deleteExternalMcpServer(workspaceId: string, id: string): ExternalMcpServerConfig[] {
+    const next = this.listExternalMcpServers(workspaceId).filter((s) => s.id !== id)
+    this.saveAppData(workspaceId, "mcp_servers", { servers: next })
+    return next
   }
 
   createFxCacheAdapter(): FxCacheAdapter {

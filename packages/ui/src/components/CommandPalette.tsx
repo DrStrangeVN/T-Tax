@@ -17,7 +17,9 @@ import {
   FileText,
   ArrowRightLeft,
   Plus,
-  Scale
+  Scale,
+  Sparkles,
+  Plug
 } from "lucide-react"
 import type { WorkspaceDTO } from "@t-tax/core"
 import { useTransport } from "../transport/client.js"
@@ -32,7 +34,8 @@ interface CommandPaletteProps {
   onOpenCounterparty?: (taxCode: string) => void
   onCreateTransaction?: () => void
   onCreateJournalVoucher?: () => void
-  onOpenAccountingTab?: (tab: "journal" | "trial_balance" | "vat" | "hkd" | "bank") => void
+  onOpenAccountingTab?: (tab: "journal" | "trial_balance" | "vat" | "hkd" | "bank" | "aging" | "assets") => void
+  onOpenCopilotTab?: (tab: "chat" | "audit" | "forecast" | "mcp") => void
   workspaceId: string
   workspaces: WorkspaceDTO[]
   onSwitchWorkspace: (id: string) => void
@@ -59,6 +62,7 @@ export function CommandPalette({
   onCreateTransaction,
   onCreateJournalVoucher,
   onOpenAccountingTab,
+  onOpenCopilotTab,
   workspaceId,
   workspaces,
   onSwitchWorkspace,
@@ -111,11 +115,12 @@ export function CommandPalette({
       { id: "unsorted", label: "Hộp thư Chứng từ AI (Unsorted)", keywords: "hop thu chung tu duyet ai ocr xml", icon: Inbox, kbd: "⌘2" },
       { id: "transactions", label: "Sổ Giao dịch & Hóa đơn", keywords: "so giao dich hoa don mua ban", icon: ReceiptText, kbd: "⌘3" },
       { id: "converter", label: "Chuyển đổi & Kiểm toán XML hàng loạt", keywords: "xml batch hang loat pdf excel", icon: FileCode2, kbd: "⌘4" },
-      { id: "accounting", label: "Kế toán VAS & Đối chiếu Sao kê", keywords: "ke toan vas so cai sao ke ngan hang", icon: BookOpenCheck, kbd: "⌘5" },
-      { id: "counterparties", label: "Đối tác & Rủi ro MST", keywords: "doi tac nha cung cap khach hang mst rui ro", icon: Building2, kbd: "⌘6" },
-      { id: "apps", label: "Ứng dụng (Email IMAP, Tạo HĐ, Cổng Thuế)", keywords: "ung dung email imap cong thue", icon: Blocks, kbd: "⌘7" },
-      { id: "vault", label: "Kho Chứng từ gốc (Vault)", keywords: "kho luu tru file goc pdf xml anh", icon: FolderArchive, kbd: "⌘8" },
-      { id: "settings", label: "Cài đặt hệ thống & Sao lưu", keywords: "cai dat sao luu backup theme", icon: Settings, kbd: "⌘9" }
+      { id: "accounting", label: "Kế toán VAS & Đối chiếu Sao kê", keywords: "ke toan vas so cai sao ke ngan hang cong no tscd", icon: BookOpenCheck, kbd: "⌘5" },
+      { id: "copilot", label: "Trợ lý AI, Kiểm toán & MCP Hub", keywords: "tro ly ai copilot mcp kiem toan rui ro du bao dong tien", icon: Sparkles, kbd: "⌘J" },
+      { id: "counterparties", label: "Đối tác & Rủi ro MST", keywords: "doi tac nha cung cap khach hang mst rui ro", icon: Building2, kbd: "⌘7" },
+      { id: "apps", label: "Ứng dụng (Email IMAP, Tạo HĐ, Cổng Thuế)", keywords: "ung dung email imap cong thue", icon: Blocks, kbd: "⌘8" },
+      { id: "vault", label: "Kho Chứng từ gốc (Vault)", keywords: "kho luu tru file goc pdf xml anh", icon: FolderArchive, kbd: "⌘9" },
+      { id: "settings", label: "Cài đặt hệ thống, Quy tắc AI & Sao lưu", keywords: "cai dat sao luu backup theme quy tac smart rule", icon: Settings, kbd: "⌘0" }
     ],
     []
   )
@@ -182,6 +187,50 @@ export function CommandPalette({
           icon: ArrowRightLeft,
           iconClass: "text-[var(--cyan)]",
           action: () => onOpenAccountingTab("bank")
+        },
+        {
+          id: "tab-aging",
+          label: "Mở Công nợ Phải thu / Phải trả (AR/AP Aging)",
+          keywords: "cong no phai thu phai tra tuoi no ar ap 131 331",
+          icon: ReceiptText,
+          iconClass: "text-[var(--green)]",
+          action: () => onOpenAccountingTab("aging")
+        },
+        {
+          id: "tab-assets",
+          label: "Mở Quản lý TSCĐ (211) & CCDC (242) — Khấu hao",
+          keywords: "tai san co dinh tscd ccdc khau hao phan bo 211 242",
+          icon: Building2,
+          iconClass: "text-[var(--indigo)]",
+          action: () => onOpenAccountingTab("assets")
+        }
+      )
+    }
+    if (onOpenCopilotTab) {
+      items.push(
+        {
+          id: "ai-audit",
+          label: "Chạy Kiểm toán Rủi ro Thuế (AI Audit)",
+          keywords: "kiem toan rui ro thue ai audit bat thuong trung hoa don tien mat",
+          icon: Sparkles,
+          iconClass: "text-[var(--rose)]",
+          action: () => onOpenCopilotTab("audit")
+        },
+        {
+          id: "ai-forecast",
+          label: "Xem Dự báo Dòng tiền, Burn Rate & Runway",
+          keywords: "du bao dong tien burn rate runway dinh phi forecast",
+          icon: Sparkles,
+          iconClass: "text-[var(--cyan)]",
+          action: () => onOpenCopilotTab("forecast")
+        },
+        {
+          id: "mcp-hub",
+          label: "Mở MCP Hub (Server, Playground & Client)",
+          keywords: "mcp model context protocol claude cursor server client",
+          icon: Plug,
+          iconClass: "text-[var(--indigo)]",
+          action: () => onOpenCopilotTab("mcp")
         }
       )
     }
@@ -217,6 +266,7 @@ export function CommandPalette({
     onCreateJournalVoucher,
     onCreateTransaction,
     onOpenAccountingTab,
+    onOpenCopilotTab,
     onQuickExport,
     onToggleTheme
   ])

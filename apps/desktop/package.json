@@ -20,6 +20,7 @@
     "@napi-rs/canvas": "^1.2.0",
     "@t-tax/core": "workspace:*",
     "@t-tax/db": "workspace:*",
+    "@t-tax/mcp": "workspace:*",
     "@t-tax/ui": "workspace:*",
     "better-sqlite3": "^13.2.0",
     "drizzle-orm": "^0.45.4",

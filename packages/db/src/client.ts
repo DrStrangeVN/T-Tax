@@ -22,6 +22,9 @@ const INIT_SQL = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -16000;
+PRAGMA temp_store = MEMORY;
+PRAGMA mmap_size = 67108864;
 
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
@@ -174,6 +177,7 @@ CREATE INDEX IF NOT EXISTS tx_ws_compliance_idx ON transactions(workspace_id, co
 CREATE INDEX IF NOT EXISTS tx_ws_cat_idx ON transactions(workspace_id, category_code);
 CREATE INDEX IF NOT EXISTS tx_ws_proj_idx ON transactions(workspace_id, project_code);
 CREATE INDEX IF NOT EXISTS tx_ws_mst_idx ON transactions(workspace_id, merchant_tax_code);
+CREATE INDEX IF NOT EXISTS tx_ws_payment_idx ON transactions(workspace_id, payment_status, direction, issued_at);
 
 CREATE TABLE IF NOT EXISTS einvoice_records (
   id TEXT PRIMARY KEY,
@@ -365,6 +369,69 @@ CREATE TABLE IF NOT EXISTS legal_rules_cache (
   payload_json TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 );
+
+CREATE TABLE IF NOT EXISTS smart_rules (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 100,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  match_field TEXT NOT NULL DEFAULT 'any',
+  match_type TEXT NOT NULL DEFAULT 'contains',
+  pattern TEXT NOT NULL,
+  direction TEXT NOT NULL DEFAULT 'all',
+  assign_category_code TEXT,
+  assign_debit_account TEXT,
+  assign_credit_account TEXT,
+  assign_project_code TEXT,
+  tax_deductible INTEGER,
+  hit_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+CREATE INDEX IF NOT EXISTS sr_ws_prio_idx ON smart_rules(workspace_id, priority);
+
+CREATE TABLE IF NOT EXISTS fixed_assets (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  asset_type TEXT NOT NULL DEFAULT 'tscd',
+  purchase_date TEXT NOT NULL,
+  original_cost_vnd INTEGER NOT NULL DEFAULT 0,
+  residual_value_vnd INTEGER NOT NULL DEFAULT 0,
+  useful_life_months INTEGER NOT NULL DEFAULT 36,
+  accumulated_depreciation_vnd INTEGER NOT NULL DEFAULT 0,
+  asset_account TEXT NOT NULL DEFAULT '211',
+  depreciation_account TEXT NOT NULL DEFAULT '214',
+  expense_account TEXT NOT NULL DEFAULT '6424',
+  department TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  last_depreciated_period TEXT,
+  source_transaction_id TEXT REFERENCES transactions(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+CREATE INDEX IF NOT EXISTS fa_ws_status_idx ON fixed_assets(workspace_id, status);
+
+CREATE TABLE IF NOT EXISTS ai_chat_sessions (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+  updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+CREATE INDEX IF NOT EXISTS ai_sess_ws_upd_idx ON ai_chat_sessions(workspace_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS ai_chat_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES ai_chat_sessions(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tool_traces_json TEXT,
+  actions_json TEXT,
+  provider_used TEXT,
+  created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+CREATE INDEX IF NOT EXISTS ai_msg_sess_idx ON ai_chat_messages(session_id, created_at);
 
 -- FTS5 Virtual Table for sub-10ms search across Vietnamese transactions & invoices
 CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts USING fts5(

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react"
-import { Plus, Trash2, CheckCircle2, Download, Upload, TestTube2 } from "lucide-react"
+import { Plus, Trash2, CheckCircle2, Download, Upload, TestTube2, Sparkles, Play } from "lucide-react"
 import {
   LLM_PROVIDER_PRESETS,
   REGIME_METADATA,
@@ -8,6 +8,7 @@ import {
   type BankDetails,
   type GlassIntensity,
   type LLMProviderConfig,
+  type SmartRuleDTO,
   type WorkspaceDTO
 } from "@t-tax/core/browser"
 import { useTransport } from "../transport/client.js"
@@ -38,9 +39,9 @@ export function SettingsPage({
   onToast
 }: SettingsProps) {
   const transport = useTransport()
-  const [tab, setTab] = useState<"workspace" | "ai" | "categories" | "projects" | "fields" | "appearance" | "backup">(
-    "workspace"
-  )
+  const [tab, setTab] = useState<
+    "workspace" | "ai" | "rules" | "categories" | "projects" | "fields" | "appearance" | "backup"
+  >("workspace")
 
   const [wsForm, setWsForm] = useState({
     name: workspace.name,
@@ -71,6 +72,26 @@ export function SettingsPage({
   const [categories, setCategories] = useState<Array<Record<string, unknown>>>([])
   const [projects, setProjects] = useState<Array<Record<string, unknown>>>([])
   const [fields, setFields] = useState<Array<Record<string, unknown>>>([])
+  const [smartRules, setSmartRules] = useState<SmartRuleDTO[]>([])
+  const [ruleProposals, setRuleProposals] = useState<
+    Array<{
+      name: string
+      matchField: "merchantTaxCode" | "merchant"
+      pattern: string
+      direction: "input" | "output"
+      assignCategoryCode: string
+      occurrences: number
+    }>
+  >([])
+  const [newRule, setNewRule] = useState({
+    name: "",
+    matchField: "merchant" as SmartRuleDTO["matchField"],
+    matchType: "contains" as SmartRuleDTO["matchType"],
+    pattern: "",
+    direction: "input" as SmartRuleDTO["direction"],
+    assignCategoryCode: "software",
+    assignDebitAccount: "6427"
+  })
 
   const [newCat, setNewCat] = useState({ code: "", name: "", color: "#2563EB", defaultDebitAccount: "6427", llmPrompt: "" })
   const [newProject, setNewProject] = useState({ code: "", name: "", color: "#0EA5E9", llmPrompt: "" })
@@ -86,12 +107,14 @@ export function SettingsPage({
   }, [openNewWsSignal])
 
   const loadAll = useCallback(async () => {
-    const [s, p, cats, projs, flds] = await Promise.all([
+    const [s, p, cats, projs, flds, rules, props] = await Promise.all([
       transport.getSettings(workspace.id),
       transport.getLLMProviders(workspace.id),
       transport.listCategories(workspace.id),
       transport.listProjects(workspace.id),
-      transport.listFields(workspace.id)
+      transport.listFields(workspace.id),
+      transport.listSmartRules(workspace.id),
+      transport.proposeSmartRules(workspace.id)
     ])
     setSettingsMap(s)
     if (p.length > 0) {
@@ -111,6 +134,8 @@ export function SettingsPage({
     setCategories(cats)
     setProjects(projs)
     setFields(flds)
+    setSmartRules(rules)
+    setRuleProposals(props)
   }, [workspace.id, transport])
 
   useEffect(() => {
@@ -201,6 +226,7 @@ export function SettingsPage({
           {[
             { id: "workspace", label: "Công ty & Chế độ KT" },
             { id: "ai", label: "AI & Prompt" },
+            { id: "rules", label: "Quy tắc AI" },
             { id: "categories", label: "Danh mục" },
             { id: "projects", label: "Dự án" },
             { id: "fields", label: "Trường tùy chỉnh" },
@@ -670,6 +696,168 @@ export function SettingsPage({
                 />
                 <i />
               </label>
+            </div>
+          </div>
+        )}
+
+        {tab === "rules" && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-[14px] font-semibold">Quy tắc Phân loại & Định khoản Tự động (Smart Rules)</h2>
+                <p className="text-[12px] text-[var(--muted)]">
+                  Tự động gán danh mục & tài khoản Nợ VAS theo tên đối tác, MST hoặc diễn giải hóa đơn.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await transport.applySmartRulesToLedger(workspace.id)
+                  await loadAll()
+                  onToast(`Đã áp dụng quy tắc cho ${res.updatedCount} giao dịch trong sổ.`, "ok")
+                }}
+                className="gb gb-p"
+              >
+                <Play size={13} />
+                <span>Áp dụng quy tắc cho toàn sổ</span>
+              </button>
+            </div>
+
+            {ruleProposals.length > 0 && (
+              <div className="rounded-[13px] border border-[var(--cyan)]/35 bg-[var(--cyan-s)] p-3.5 space-y-2">
+                <div className="text-[12px] font-semibold text-[var(--cyan)] flex items-center gap-1.5">
+                  <Sparkles size={13.5} />
+                  <span>AI học thói quen định khoản từ sổ đã duyệt ({ruleProposals.length} gợi ý)</span>
+                </div>
+                <div className="space-y-1.5">
+                  {ruleProposals.map((p, idx) => (
+                    <div key={idx} className="flex items-center justify-between gap-2 text-[12px] bg-[var(--panel-solid)] px-3 py-2 rounded-[9px] border border-[var(--line)]">
+                      <div className="truncate">
+                        <strong>{p.name}</strong> · Khớp {p.matchField} = <code>{p.pattern}</code> → Danh mục{" "}
+                        <span className="tag">{p.assignCategoryCode}</span> ({p.occurrences} chứng từ)
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await transport.upsertSmartRule(workspace.id, {
+                            name: p.name,
+                            matchField: p.matchField,
+                            matchType: "contains",
+                            pattern: p.pattern,
+                            direction: p.direction,
+                            assignCategoryCode: p.assignCategoryCode
+                          })
+                          await loadAll()
+                          onToast(`Đã lưu quy tắc tự động "${p.name}".`, "ok")
+                        }}
+                        className="gb text-[11.5px] shrink-0"
+                      >
+                        <Plus size={12} />
+                        <span>Áp dụng</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault()
+                if (!newRule.name.trim() || !newRule.pattern.trim()) {
+                  onToast("Nhập tên quy tắc và từ khóa khớp.", "warn")
+                  return
+                }
+                await transport.upsertSmartRule(workspace.id, newRule)
+                setNewRule({ ...newRule, name: "", pattern: "" })
+                await loadAll()
+                onToast("Đã tạo quy tắc định khoản thông minh.", "ok")
+              }}
+              className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end"
+            >
+              <div className="sm:col-span-3">
+                <label className="block text-[10.5px] text-[var(--muted)] mb-1">Tên quy tắc</label>
+                <input
+                  value={newRule.name}
+                  onChange={(e) => setNewRule({ ...newRule, name: e.target.value })}
+                  placeholder="VD: Hóa đơn AWS / Điện lực"
+                  className="w-full h-9 px-2.5 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-[10.5px] text-[var(--muted)] mb-1">Trường khớp</label>
+                <select
+                  value={newRule.matchField}
+                  onChange={(e) => setNewRule({ ...newRule, matchField: e.target.value as SmartRuleDTO["matchField"] })}
+                  className="w-full h-9 px-2 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                >
+                  <option value="merchant" className="bg-[var(--panel-solid)]">Nhà cung cấp</option>
+                  <option value="merchantTaxCode" className="bg-[var(--panel-solid)]">MST đối tác</option>
+                  <option value="name" className="bg-[var(--panel-solid)]">Tên giao dịch</option>
+                  <option value="any" className="bg-[var(--panel-solid)]">Bất kỳ trường nào</option>
+                </select>
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-[10.5px] text-[var(--muted)] mb-1">Từ khóa khớp</label>
+                <input
+                  value={newRule.pattern}
+                  onChange={(e) => setNewRule({ ...newRule, pattern: e.target.value })}
+                  placeholder="VD: FPT / 0312..."
+                  className="w-full h-9 px-2.5 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-[10.5px] text-[var(--muted)] mb-1">Gán danh mục</label>
+                <select
+                  value={newRule.assignCategoryCode}
+                  onChange={(e) => setNewRule({ ...newRule, assignCategoryCode: e.target.value })}
+                  className="w-full h-9 px-2 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
+                >
+                  {categories.map((c) => (
+                    <option key={String(c.code)} value={String(c.code)} className="bg-[var(--panel-solid)]">
+                      {String(c.name)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="sm:col-span-1">
+                <label className="block text-[10.5px] text-[var(--muted)] mb-1">TK Nợ</label>
+                <input
+                  value={newRule.assignDebitAccount}
+                  onChange={(e) => setNewRule({ ...newRule, assignDebitAccount: e.target.value })}
+                  className="w-full h-9 px-2 rounded-[9px] bg-[var(--raised)] border border-[var(--line)] font-mono text-[12px]"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <button type="submit" className="pb w-full justify-center h-9">
+                  <Plus size={13.5} />
+                  <span>Thêm</span>
+                </button>
+              </div>
+            </form>
+
+            <div className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] divide-y divide-[var(--line)]">
+              {smartRules.length === 0 ? (
+                <div className="p-6 text-center text-[12px] text-[var(--dim)]">Chưa có quy tắc tự động nào.</div>
+              ) : (
+                smartRules.map((r) => (
+                  <div key={r.id} className="p-3 flex items-center justify-between gap-2 text-[12px]">
+                    <div className="min-w-0">
+                      <div className="font-semibold flex items-center gap-2">
+                        <span>{r.name}</span>
+                        <span className="tag">{r.matchField} · &ldquo;{r.pattern}&rdquo;</span>
+                        {r.assignCategoryCode && <span className="tag tag-ok">{r.assignCategoryCode}</span>}
+                        {r.assignDebitAccount && <span className="tag font-mono">TK {r.assignDebitAccount}</span>}
+                      </div>
+                      <div className="text-[11px] text-[var(--dim)] tnum">Đã áp dụng {r.hitCount} lần</div>
+                    </div>
+                    {renderDeleteGuard(`rule-${r.id}`, async () => {
+                      await transport.deleteSmartRule(workspace.id, r.id)
+                      await loadAll()
+                    })}
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}

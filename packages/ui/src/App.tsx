@@ -10,6 +10,7 @@ const UnsortedPage = lazy(() => import("./pages/UnsortedPage.js").then((m) => ({
 const TransactionsPage = lazy(() => import("./pages/TransactionsPage.js").then((m) => ({ default: m.TransactionsPage })))
 const BatchConverterPage = lazy(() => import("./pages/BatchConverterPage.js").then((m) => ({ default: m.BatchConverterPage })))
 const AccountingPage = lazy(() => import("./pages/AccountingPage.js").then((m) => ({ default: m.AccountingPage })))
+const AiCopilotPage = lazy(() => import("./pages/AiCopilotPage.js").then((m) => ({ default: m.AiCopilotPage })))
 const CounterpartiesPage = lazy(() => import("./pages/CounterpartiesPage.js").then((m) => ({ default: m.CounterpartiesPage })))
 const MiniAppsPage = lazy(() => import("./pages/MiniAppsPage.js").then((m) => ({ default: m.MiniAppsPage })))
 const VaultPage = lazy(() => import("./pages/VaultPage.js").then((m) => ({ default: m.VaultPage })))
@@ -21,6 +22,7 @@ const NAV_ORDER: NavPage[] = [
   "transactions",
   "converter",
   "accounting",
+  "copilot",
   "counterparties",
   "apps",
   "vault",
@@ -81,8 +83,9 @@ export function TTaxApp() {
   const [txInspectorOpen, setTxInspectorOpen] = useState(false)
   const [focusTxId, setFocusTxId] = useState<string | null>(null)
   const [accountingTabPreset, setAccountingTabPreset] = useState<
-    "journal" | "trial_balance" | "vat" | "hkd" | "bank" | undefined
+    "journal" | "trial_balance" | "vat" | "hkd" | "bank" | "aging" | "assets" | undefined
   >(undefined)
+  const [copilotTabPreset, setCopilotTabPreset] = useState<"chat" | "audit" | "forecast" | "mcp">("chat")
   const [accountingNewModalSignal, setAccountingNewModalSignal] = useState(0)
   const [counterpartySearchPreset, setCounterpartySearchPreset] = useState("")
   const [openNewWsSignal, setOpenNewWsSignal] = useState(0)
@@ -221,6 +224,9 @@ export function TTaxApp() {
       if (k === "k") {
         e.preventDefault()
         setCmdOpen((v) => !v)
+      } else if (k === "j") {
+        e.preventDefault()
+        setActivePage("copilot")
       } else if (e.key === "\\") {
         e.preventDefault()
         setSidebarMode((prev) => (prev === "collapsed" ? "expanded" : "collapsed"))
@@ -424,6 +430,22 @@ export function TTaxApp() {
               onToast={showToast}
             />
           )}
+          {activePage === "copilot" && (
+            <AiCopilotPage
+              workspace={activeWorkspace}
+              initialTab={copilotTabPreset}
+              onNavigatePage={(p) => setActivePage(p)}
+              onOpenTransaction={(id) => {
+                setFocusTxId(id)
+                setActivePage("transactions")
+              }}
+              onOpenAccountingTab={(t) => {
+                setAccountingTabPreset(t)
+                setActivePage("accounting")
+              }}
+              onToast={showToast}
+            />
+          )}
           {activePage === "counterparties" && (
             <CounterpartiesPage
               workspace={activeWorkspace}
@@ -496,6 +518,10 @@ export function TTaxApp() {
         onOpenAccountingTab={(t) => {
           setAccountingTabPreset(t)
           setActivePage("accounting")
+        }}
+        onOpenCopilotTab={(t) => {
+          setCopilotTabPreset(t)
+          setActivePage("copilot")
         }}
         workspaceId={activeWorkspace.id}
         workspaces={workspaces}

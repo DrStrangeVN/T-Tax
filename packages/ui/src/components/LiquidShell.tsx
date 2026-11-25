@@ -21,7 +21,8 @@ import {
   Square,
   X,
   ChevronsUpDown,
-  Check
+  Check,
+  Sparkles
 } from "lucide-react"
 import type { SidebarMode, WorkspaceDTO } from "@t-tax/core"
 import { useTransport } from "../transport/client.js"
@@ -32,6 +33,7 @@ export type NavPage =
   | "transactions"
   | "converter"
   | "accounting"
+  | "copilot"
   | "counterparties"
   | "apps"
   | "vault"
@@ -65,6 +67,7 @@ const NAV_ITEMS: Array<{ id: NavPage; label: string; icon: React.ComponentType<{
   { id: "transactions", label: "Sổ giao dịch", icon: ReceiptText },
   { id: "converter", label: "Quét & XML", icon: FileCode2 },
   { id: "accounting", label: "Kế toán VAS", icon: BookOpenCheck },
+  { id: "copilot", label: "Trợ lý AI & MCP", icon: Sparkles },
   { id: "counterparties", label: "Đối tác MST", icon: Building2 },
   { id: "apps", label: "Tiện ích", icon: Blocks },
   { id: "vault", label: "Kho chứng từ", icon: FolderArchive },
@@ -76,11 +79,12 @@ const PAGE_TITLES: Record<NavPage, { title: string; subtitle: string }> = {
   unsorted: { title: "Hộp thư Chứng từ", subtitle: "Kéo thả XML, PDF, ZIP hoặc ảnh hóa đơn — duyệt ⌘↵" },
   transactions: { title: "Sổ Giao dịch & Hóa đơn", subtitle: "Bảng kê ảo hóa, lọc kỳ & hạch toán hàng loạt" },
   converter: { title: "Chuyển đổi & Kiểm toán XML", subtitle: "Parse QĐ 1450/1510, XMLDSig, iTaxViewer PDF & HTKK/MISA" },
-  accounting: { title: "Kế toán & Đối chiếu Sao kê", subtitle: "Bút toán Nợ/Có, bảng kê GTGT, sổ HKD & khớp ngân hàng" },
+  accounting: { title: "Kế toán & Đối chiếu Sao kê", subtitle: "Bút toán Nợ/Có, bảng kê GTGT, AR/AP, TSCĐ & khớp ngân hàng" },
+  copilot: { title: "Trợ lý AI & MCP Hub", subtitle: "Hỏi đáp sổ sách SQLite, Kiểm toán rủi ro thuế, Dự báo dòng tiền & MCP v2" },
   counterparties: { title: "Đối tác & Rủi ro MST", subtitle: "Trạng thái hoạt động mã số thuế người bán / mua" },
   apps: { title: "Ứng dụng Mở rộng", subtitle: "Email IMAP, Hóa đơn VietQR, Cổng HĐĐT & Nhập Excel" },
   vault: { title: "Kho Chứng từ gốc", subtitle: "Lưu trữ bất biến theo tháng, ghép cặp XML ↔ PDF & SHA-256" },
-  settings: { title: "Cài đặt Hệ thống", subtitle: "Đa MST, TT99/TT200/TT133/HKD, AI Prompt & Liquid Glass" }
+  settings: { title: "Cài đặt Hệ thống", subtitle: "Đa MST, TT99/TT200/TT133/HKD, Quy tắc AI & Liquid Glass" }
 }
 
 export function LiquidShell({

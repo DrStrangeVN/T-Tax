@@ -27,10 +27,11 @@ import { HKD_TAX_SECTORS } from "@t-tax/core/browser"
 import { useTransport, fileToPayload } from "../transport/client.js"
 import { MoneyInput } from "../components/MoneyInput.js"
 import { formatDateVi, formatMoney } from "../utils/format.js"
+import { ArApAgingTab, FixedAssetsTab } from "./AccountingAdvancedTabs.js"
 
 interface AccountingProps {
   workspace: WorkspaceDTO
-  initialTab?: "journal" | "trial_balance" | "vat" | "hkd" | "bank"
+  initialTab?: "journal" | "trial_balance" | "vat" | "hkd" | "bank" | "aging" | "assets"
   openNewVoucherSignal?: number
   onRefreshCounts?: () => void
   onToast: (msg: string, tone?: "ok" | "warn" | "err") => void
@@ -259,7 +260,7 @@ function AccountCombobox({
 
 export function AccountingPage({ workspace, initialTab, openNewVoucherSignal, onRefreshCounts, onToast }: AccountingProps) {
   const transport = useTransport()
-  const [tab, setTab] = useState<"journal" | "trial_balance" | "vat" | "hkd" | "bank">(initialTab ?? "journal")
+  const [tab, setTab] = useState<"journal" | "trial_balance" | "vat" | "hkd" | "bank" | "aging" | "assets">(initialTab ?? "journal")
   const [period, setPeriod] = useState<"all" | "month" | "quarter" | "year">("all")
   const [hkdSector, setHkdSector] = useState<HkdTaxSectorCode>(() => loadHkdSector())
 
@@ -642,15 +643,17 @@ export function AccountingPage({ workspace, initialTab, openNewVoucherSignal, on
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-4 py-2.5 border-b border-[var(--line)] flex flex-wrap items-center justify-between gap-2 bg-[var(--sheet-bg)] shrink-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="seg">
+      <div className="px-4 py-2.5 border-b border-[var(--line)] flex flex-col gap-2 bg-[var(--sheet-bg)] shrink-0">
+        <div className="flex items-center justify-between gap-2 overflow-x-auto">
+          <div className="seg whitespace-nowrap shrink-0">
             {[
               { id: "journal", label: "Bút toán Nợ / Có" },
               { id: "trial_balance", label: "Cân đối Tài khoản" },
               { id: "vat", label: "Bảng kê GTGT" },
               { id: "hkd", label: "Sổ HKD 2026" },
-              { id: "bank", label: "Đối chiếu Sao kê" }
+              { id: "bank", label: "Đối chiếu Sao kê" },
+              { id: "aging", label: "Công nợ AR/AP" },
+              { id: "assets", label: "TSCĐ & CCDC" }
             ].map((t) => (
               <button
                 key={t.id}
@@ -662,8 +665,10 @@ export function AccountingPage({ workspace, initialTab, openNewVoucherSignal, on
               </button>
             ))}
           </div>
+        </div>
 
-          <div className="seg">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="seg shrink-0">
             {[
               { id: "all", label: "Mọi kỳ" },
               { id: "month", label: "Tháng này" },
@@ -680,51 +685,61 @@ export function AccountingPage({ workspace, initialTab, openNewVoucherSignal, on
               </button>
             ))}
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {tab === "journal" && (
-            <>
-              <span className="tag tag-ok tnum">∑Nợ = ∑Có: {formatMoney(journalSum.debit, "VND")}</span>
-              <button type="button" onClick={() => setShowManualJeModal(true)} className="pb">
+          <div className="flex flex-wrap items-center gap-2">
+            {tab === "journal" && (
+              <>
+                <span className="tag tag-ok tnum">∑Nợ = ∑Có: {formatMoney(journalSum.debit, "VND")}</span>
+                <button type="button" onClick={() => setShowManualJeModal(true)} className="pb">
+                  <Plus size={13} />
+                  <span>Phiếu kế toán</span>
+                </button>
+              </>
+            )}
+            {tab === "trial_balance" && (
+              <button type="button" onClick={openOpeningModal} className="gb hl">
                 <Plus size={13} />
-                <span>Phiếu kế toán</span>
+                <span>Số dư đầu kỳ</span>
               </button>
-            </>
-          )}
-          {tab === "trial_balance" && (
-            <button type="button" onClick={openOpeningModal} className="gb hl">
-              <Plus size={13} />
-              <span>Số dư đầu kỳ</span>
-            </button>
-          )}
-          {tab === "vat" && (
-            <button type="button" onClick={handleVatClosing} className="pb">
-              <ArrowRightLeft size={13} />
-              <span>Kết chuyển GTGT cuối kỳ</span>
-            </button>
-          )}
-          {tab === "hkd" && transport.exportHkdBookExcel && (
+            )}
+            {tab === "vat" && (
+              <button type="button" onClick={handleVatClosing} className="pb">
+                <ArrowRightLeft size={13} />
+                <span>Kết chuyển GTGT cuối kỳ</span>
+              </button>
+            )}
+            {tab === "hkd" && transport.exportHkdBookExcel && (
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await transport.exportHkdBookExcel!(workspace.id, hkdSector, range)
+                  if (!res.canceled && res.savedPath) onToast(`Đã xuất Sổ S1/S2-HKD: ${res.savedPath}`, "ok")
+                }}
+                className="pb"
+              >
+                <Download size={13} />
+                <span>Xuất Sổ S1/S2-HKD</span>
+              </button>
+            )}
             <button
               type="button"
-              onClick={async () => {
-                const res = await transport.exportHkdBookExcel!(workspace.id, hkdSector, range)
-                if (!res.canceled && res.savedPath) onToast(`Đã xuất Sổ S1/S2-HKD: ${res.savedPath}`, "ok")
-              }}
-              className="pb"
+              onClick={() => transport.exportReport(workspace.id, "htkk_in", range)}
+              className="gb"
+              title="Xuất bảng kê HTKK mua vào"
             >
               <Download size={13} />
-              <span>Xuất Sổ S1/S2-HKD</span>
+              <span>HTKK</span>
             </button>
-          )}
-          <button type="button" onClick={() => transport.exportReport(workspace.id, "htkk_in", range)} className="gb">
-            <Download size={13} />
-            <span className="hidden xl:inline">HTKK Mua vào</span>
-          </button>
-          <button type="button" onClick={() => transport.exportReport(workspace.id, "misa_in", range)} className="gb">
-            <Download size={13} />
-            <span className="hidden xl:inline">Xuất MISA</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => transport.exportReport(workspace.id, "misa_in", range)}
+              className="gb"
+              title="Xuất chứng từ tương thích MISA"
+            >
+              <Download size={13} />
+              <span>Xuất MISA</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1414,6 +1429,28 @@ export function AccountingPage({ workspace, initialTab, openNewVoucherSignal, on
               </div>
             </div>
           </div>
+        )}
+
+        {tab === "aging" && (
+          <ArApAgingTab
+            workspace={workspace}
+            onChanged={() => {
+              loadAll()
+              onRefreshCounts?.()
+            }}
+            onToast={onToast}
+          />
+        )}
+
+        {tab === "assets" && (
+          <FixedAssetsTab
+            workspace={workspace}
+            onChanged={() => {
+              loadAll()
+              onRefreshCounts?.()
+            }}
+            onToast={onToast}
+          />
         )}
       </div>
 

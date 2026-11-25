@@ -160,6 +160,38 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await page.screenshot({ path: join(shotDir, "05c-accounting-ledger-drawer.png") })
     await page.keyboard.press("Escape")
 
+    // Verify AR/AP Aging & Fixed Assets tabs in Accounting
+    await page.click('button:has-text("Công nợ AR/AP")')
+    await expect(page.locator("text=Tổng Phải thu (AR 131)").first()).toBeVisible({ timeout: 10_000 })
+    await page.click('button:has-text("TSCĐ & CCDC")')
+    await expect(page.locator("text=Tổng Nguyên giá").first()).toBeVisible({ timeout: 10_000 })
+    await page.locator('input[placeholder*="MacBook"]').fill("MacBook Pro M4 Demo")
+    await page.locator('form input[inputmode="decimal"]').first().fill("36000000")
+    await page.click('button:has-text("Ghi tăng")')
+    await expect(page.locator("text=MacBook Pro M4 Demo").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "05d-accounting-assets.png") })
+
+    // 6b. Verify AI Copilot, Tax Risk Audit, Cashflow Forecast & MCP Hub
+    await page.click('[data-nav="copilot"]')
+    await expect(page.locator("text=Trợ lý Kế toán & Thuế T-Tax AI").first()).toBeVisible({ timeout: 10_000 })
+    await page.click('button:has-text("Tóm tắt tài chính & thuế GTGT kỳ này")')
+    await expect(page.locator("text=ttax_get_financial_overview").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "12-ai-copilot-chat.png") })
+
+    await page.click('button:has-text("Kiểm toán Rủi ro")')
+    await expect(page.locator("text=Điểm sức khỏe Tuân thủ").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "13-ai-tax-audit.png") })
+
+    await page.click('button:has-text("Dự báo & Dòng tiền")')
+    await expect(page.locator("text=Bảng dự báo dòng tiền").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "14-cashflow-forecast.png") })
+
+    await page.click('button:has-text("MCP Hub")')
+    await expect(page.locator("text=T-Tax MCP Server (SDK v2)").first()).toBeVisible({ timeout: 10_000 })
+    await page.click('button:has-text("Chạy MCP Tool")')
+    await expect(page.locator("text=Tổng quan Tài chính & Thuế").first()).toBeVisible({ timeout: 10_000 })
+    await page.screenshot({ path: join(shotDir, "15-mcp-hub.png") })
+
     // Test Command Palette FTS5 Search after tx committed
     await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k")
     await page.locator('.pal input[type="text"], .pal input:not([type])').first().fill("00004321")

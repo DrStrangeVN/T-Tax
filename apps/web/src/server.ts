@@ -21,6 +21,17 @@ import {
   type TransactionDirection
 } from "@t-tax/core"
 import { openTTaxDatabase, TTaxService, VaultStorage } from "@t-tax/db"
+import {
+  buildCopilotExternalMcpTools,
+  callExternalMcpTool,
+  createTTaxWebMcpHandler,
+  invokeBuiltInMcpTool,
+  testExternalMcpServer,
+  TTAX_MCP_PROMPTS_CATALOG,
+  TTAX_MCP_RESOURCES_CATALOG,
+  TTAX_MCP_TOOL_CATALOG,
+  TTAX_MCP_VERSION
+} from "@t-tax/mcp"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.TTAX_DATA_DIR || join(process.cwd(), "data")
@@ -64,6 +75,21 @@ function decryptStr(stored: string): string {
 }
 
 const app = new Hono()
+
+let webMcpRequestCount = 0
+const webMcpRecentLogs: Array<{ ts: string; method: string; tool?: string; ok: boolean; durationMs: number; error?: string }> = []
+const webMcpToken = process.env.TTAX_MCP_TOKEN || ""
+const webMcpHandler = createTTaxWebMcpHandler(service, {
+  bearerToken: webMcpToken || undefined,
+  allowRemoteHost: process.env.TTAX_MCP_ALLOW_REMOTE === "1",
+  onAuditLog: (entry) => {
+    webMcpRequestCount += 1
+    webMcpRecentLogs.unshift({ ts: new Date().toISOString(), ...entry })
+    if (webMcpRecentLogs.length > 40) webMcpRecentLogs.length = 40
+  }
+})
+
+app.all("/mcp", (c) => webMcpHandler.fetch(c.req.raw))
 
 app.get("/api/health", (c) => c.json({ ok: true, service: "t-tax-web" }))
 
@@ -309,6 +335,105 @@ app.post("/api/rpc", async (c) => {
         return c.json(service.commitTabularImport(args[0] as string, args[1] as string[], args[2] as string[][], args[3] as Record<string, string>, args[4] as TransactionDirection))
       case "renderOutgoingInvoiceHtml":
         return c.json(await service.renderOutgoingInvoice(args[0] as OutgoingInvoiceTemplateData))
+      case "runTaxAudit":
+        return c.json(service.runTaxAudit(args[0] as string))
+      case "getCashflowAnalytics":
+        return c.json(service.getCashflowAnalytics(args[0] as string, args[1] as number | undefined))
+      case "getArApAging":
+        return c.json(service.getArApAging(args[0] as string, args[1] as string | undefined))
+      case "listSmartRules":
+        return c.json(service.listSmartRules(args[0] as string))
+      case "upsertSmartRule":
+        return c.json(service.upsertSmartRule(args[0] as string, args[1] as never))
+      case "deleteSmartRule":
+        return c.json(service.deleteSmartRule(args[0] as string, args[1] as string))
+      case "proposeSmartRules":
+        return c.json(service.proposeSmartRules(args[0] as string))
+      case "applySmartRulesToLedger":
+        return c.json(service.applySmartRulesToLedger(args[0] as string))
+      case "listFixedAssets":
+        return c.json(service.listFixedAssets(args[0] as string))
+      case "createFixedAsset":
+        return c.json(service.createFixedAsset(args[0] as string, args[1] as never))
+      case "deleteFixedAsset":
+        return c.json(service.deleteFixedAsset(args[0] as string, args[1] as string))
+      case "runMonthlyDepreciation":
+        return c.json(service.runMonthlyDepreciation(args[0] as string, args[1] as string))
+      case "listAiSessions":
+        return c.json(service.listAiSessions(args[0] as string))
+      case "listAiMessages":
+        return c.json(service.listAiMessages(args[0] as string))
+      case "deleteAiSession":
+        return c.json(service.deleteAiSession(args[0] as string, args[1] as string))
+      case "chatWithCopilot": {
+        const wsId = args[0] as string
+        const payload = args[1] as { sessionId?: string; prompt: string }
+        const data = service.getAppData<{ providers?: LLMProviderConfig[] }>(wsId, "llm_providers")
+        const providers = (data.providers ?? []).map((p) => ({ ...p, apiKey: decryptStr(p.apiKey) }))
+        const externalMcpTools = buildCopilotExternalMcpTools(service.listExternalMcpServers(wsId))
+        return c.json(
+          await service.chatWithCopilot(wsId, {
+            sessionId: payload.sessionId,
+            prompt: payload.prompt,
+            providers,
+            externalMcpTools
+          })
+        )
+      }
+      case "getMcpCatalog":
+        return c.json({
+          version: TTAX_MCP_VERSION,
+          tools: TTAX_MCP_TOOL_CATALOG,
+          resources: TTAX_MCP_RESOURCES_CATALOG,
+          prompts: TTAX_MCP_PROMPTS_CATALOG,
+          stdioCliHint: `TTAX_DATA_DIR="${DATA_DIR}" npx t-tax-mcp`
+        })
+      case "getMcpHostStatus":
+      case "startMcpHost":
+      case "stopMcpHost":
+      case "rotateMcpToken":
+        return c.json({
+          running: true,
+          host: "127.0.0.1",
+          port: PORT,
+          url: `http://127.0.0.1:${PORT}/mcp`,
+          bearerToken: webMcpToken,
+          requestCount: webMcpRequestCount,
+          recentLogs: webMcpRecentLogs
+        })
+      case "invokeBuiltInMcpTool":
+        return c.json(
+          await invokeBuiltInMcpTool(
+            service,
+            args[0] as string,
+            args[1] as string,
+            (args[2] as Record<string, unknown>) ?? {}
+          )
+        )
+      case "listExternalMcpServers":
+        return c.json(service.listExternalMcpServers(args[0] as string))
+      case "saveExternalMcpServer":
+        return c.json(service.saveExternalMcpServer(args[0] as string, args[1] as never))
+      case "deleteExternalMcpServer":
+        return c.json(service.deleteExternalMcpServer(args[0] as string, args[1] as string))
+      case "testExternalMcpServer": {
+        const wsId = args[0] as string
+        const cfg = args[1] as Parameters<typeof testExternalMcpServer>[0]
+        const res = await testExternalMcpServer(cfg)
+        if (cfg.id) {
+          service.saveExternalMcpServer(wsId, {
+            ...cfg,
+            cachedTools: res.ok ? res.tools : cfg.cachedTools,
+            lastConnectedAt: res.ok ? new Date().toISOString() : cfg.lastConnectedAt,
+            lastError: res.ok ? undefined : res.message
+          })
+        }
+        return c.json(res)
+      }
+      case "callExternalMcpTool":
+        return c.json(
+          await callExternalMcpTool(args[0] as never, args[1] as string, (args[2] as Record<string, unknown>) ?? {})
+        )
       default:
         return c.text(`Unsupported RPC method: ${body.method}`, 400)
     }
@@ -348,13 +473,23 @@ app.post("/api/export", async (c) => {
 })
 
 app.post("/api/export-custom", async (c) => {
-  const body = (await c.req.json()) as { type: "ledger" | "hkd" | "batch_xml"; workspaceId?: string; accountCode?: string; sectorCode?: never; filters?: never; items?: never }
+  const body = (await c.req.json()) as {
+    type: "ledger" | "hkd" | "batch_xml" | "aging"
+    workspaceId?: string
+    accountCode?: string
+    sectorCode?: never
+    filters?: never
+    items?: never
+    asOfDate?: string
+  }
   const res =
     body.type === "ledger"
       ? await service.exportAccountLedgerExcel(body.workspaceId!, body.accountCode!, body.filters)
       : body.type === "hkd"
         ? await service.exportHkdBookExcel(body.workspaceId!, body.sectorCode!, body.filters)
-        : await service.exportBatchXmlExcel(body.items!)
+        : body.type === "aging"
+          ? await service.exportArApAgingExcel(body.workspaceId!, body.asOfDate)
+          : await service.exportBatchXmlExcel(body.items!)
   return new Response(new Uint8Array(res.buffer), {
     headers: {
       "Content-Type": "application/octet-stream",
