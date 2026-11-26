@@ -1,13 +1,15 @@
 import React, { useEffect, useState, useCallback } from "react"
-import { Plus, Trash2, CheckCircle2, Download, Upload, TestTube2, Sparkles, Play } from "lucide-react"
+import { Plus, Trash2, CheckCircle2, Download, Upload, TestTube2, Sparkles, Play, ArrowUp, ArrowDown, Radio } from "lucide-react"
 import {
   LLM_PROVIDER_PRESETS,
   REGIME_METADATA,
   VIETNAM_BANKS,
+  mergeMissingProviderPresets,
   type AccountingRegime,
   type BankDetails,
   type GlassIntensity,
   type LLMProviderConfig,
+  type Muse2ApiDiscoveryResult,
   type SmartRuleDTO,
   type WorkspaceDTO
 } from "@t-tax/core/browser"
@@ -97,6 +99,7 @@ export function SettingsPage({
   const [newProject, setNewProject] = useState({ code: "", name: "", color: "#0EA5E9", llmPrompt: "" })
   const [newField, setNewField] = useState({ code: "", name: "", type: "string", llmPrompt: "" })
   const [testingProvider, setTestingProvider] = useState<string | null>(null)
+  const [museStatus, setMuseStatus] = useState<Muse2ApiDiscoveryResult | null>(null)
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null)
 
   useEffect(() => {
@@ -117,20 +120,7 @@ export function SettingsPage({
       transport.proposeSmartRules(workspace.id)
     ])
     setSettingsMap(s)
-    if (p.length > 0) {
-      setProviders(p)
-    } else {
-      setProviders(
-        LLM_PROVIDER_PRESETS.map((pr) => ({
-          provider: pr.provider,
-          apiKey: "",
-          model: pr.defaultModel,
-          baseUrl: pr.defaultBaseUrl,
-          enabled: pr.provider === "google",
-          maxConcurrency: 2
-        }))
-      )
-    }
+    setProviders(mergeMissingProviderPresets(p))
     setCategories(cats)
     setProjects(projs)
     setFields(flds)
@@ -388,13 +378,35 @@ export function SettingsPage({
 
         {tab === "ai" && (
           <div className="space-y-4">
+            <div className="rounded-[12px] border border-[var(--cyan)]/25 bg-[var(--cyan-s)] px-3.5 py-2.5 text-[11.5px] text-[var(--text)] flex items-start gap-2">
+              <Sparkles size={14} className="text-[var(--cyan)] shrink-0 mt-0.5" />
+              <span>
+                <strong>Chuỗi ưu tiên & Dự phòng tự động:</strong> T-Tax gọi nhà cung cấp theo thứ tự từ trên xuống. Nếu local Ollama quá tải, lỗi hoặc bỏ sót dữ liệu trên hóa đơn khó, hệ thống tự chuyển sang <strong>Muse2API</strong> hoặc Cloud AI kế tiếp. Dùng nút ↑/↓ để đổi thứ tự ưu tiên.
+              </span>
+            </div>
             <div className="space-y-2.5">
               {providers.map((cfg, idx) => {
                 const preset = LLM_PROVIDER_PRESETS.find((p) => p.provider === cfg.provider)
+                const enabledBefore = providers.slice(0, idx).filter((x) => x.enabled !== false).length
+                const priorityLabel =
+                  cfg.enabled === false
+                    ? null
+                    : enabledBefore === 0
+                      ? "Chính #1"
+                      : `Dự phòng #${enabledBefore + 1}`
+                const moveProvider = (delta: -1 | 1) => {
+                  const targetIdx = idx + delta
+                  if (targetIdx < 0 || targetIdx >= providers.length) return
+                  const next = [...providers]
+                  const tmp = next[idx]!
+                  next[idx] = next[targetIdx]!
+                  next[targetIdx] = tmp
+                  setProviders(next)
+                }
                 return (
                   <div key={cfg.provider} className="rounded-[14px] border border-[var(--line)] bg-[var(--panel)] p-4 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
                         <label className="sw">
                           <input
                             type="checkbox"
@@ -407,9 +419,68 @@ export function SettingsPage({
                           />
                           <i />
                         </label>
-                        <span className="font-semibold text-[13px]">{preset?.label ?? cfg.provider}</span>
+                        <span className="font-semibold text-[13px] truncate">{preset?.label ?? cfg.provider}</span>
+                        {priorityLabel && (
+                          <span className={`tag text-[10px] shrink-0 ${enabledBefore === 0 ? "tag-ok" : ""}`}>
+                            {priorityLabel}
+                          </span>
+                        )}
+                        {cfg.provider === "muse2api" && museStatus?.reachable && (
+                          <span className={`tag text-[10px] shrink-0 ${museStatus.validAccounts > 0 && museStatus.authValid ? "tag-ok" : "tag-warn"}`}>
+                            {museStatus.validAccounts}/{museStatus.accountsTotal} TK · {museStatus.visionSupported ? "Vision OK" : "Text"}
+                          </span>
+                        )}
                       </div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => moveProvider(-1)}
+                          disabled={idx === 0}
+                          title="Tăng độ ưu tiên"
+                          className="w-7 h-7 rounded-full grid place-items-center border border-[var(--line)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-35"
+                        >
+                          <ArrowUp size={12.5} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveProvider(1)}
+                          disabled={idx === providers.length - 1}
+                          title="Giảm độ ưu tiên"
+                          className="w-7 h-7 rounded-full grid place-items-center border border-[var(--line)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-35"
+                        >
+                          <ArrowDown size={12.5} />
+                        </button>
+                        {cfg.provider === "muse2api" && transport.discoverMuse2Api && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const res = await transport.discoverMuse2Api!(cfg.baseUrl || undefined, cfg.apiKey || undefined)
+                                setMuseStatus(res)
+                                if (!res.reachable) {
+                                  onToast(res.message, "warn")
+                                  return
+                                }
+                                const next = [...providers]
+                                next[idx] = {
+                                  ...cfg,
+                                  baseUrl: res.baseUrl,
+                                  model: res.recommendedModel || cfg.model || "muse-spark",
+                                  maxConcurrency: cfg.maxConcurrency ?? 4,
+                                  enabled: res.authValid && res.validAccounts > 0 ? true : cfg.enabled
+                                }
+                                setProviders(next)
+                                onToast(res.message, res.authValid && res.validAccounts > 0 ? "ok" : "warn")
+                              } catch (err) {
+                                onToast(err instanceof Error ? err.message : "Lỗi quét Muse2API", "err")
+                              }
+                            }}
+                            className="gb"
+                          >
+                            <Radio size={12.5} />
+                            <span>Quét Muse2API cục bộ</span>
+                          </button>
+                        )}
                         {cfg.provider === "openai_compatible" && transport.discoverOllamaModels && (
                           <button
                             type="button"
@@ -460,10 +531,17 @@ export function SettingsPage({
                         </button>
                       </div>
                     </div>
+                    {preset?.hint && <div className="text-[11px] text-[var(--muted)]">{preset.hint}</div>}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <input
                         type="password"
-                        placeholder={preset?.requiresApiKey ? "API Key" : "API Key (tùy chọn cho Local)"}
+                        placeholder={
+                          cfg.provider === "muse2api"
+                            ? "Bearer API Key của Muse2API"
+                            : preset?.requiresApiKey
+                              ? "API Key"
+                              : "API Key (tùy chọn cho Local)"
+                        }
                         value={cfg.apiKey}
                         onChange={(e) => {
                           const next = [...providers]
@@ -482,9 +560,13 @@ export function SettingsPage({
                         }}
                         className="h-8 px-2.5 rounded-[8px] bg-[var(--raised)] border border-[var(--line)] text-[12px]"
                       />
-                      {cfg.provider === "openai_compatible" && (
+                      {(cfg.provider === "openai_compatible" || cfg.provider === "muse2api") && (
                         <input
-                          placeholder="Base URL (VD: http://localhost:11434/v1)"
+                          placeholder={
+                            cfg.provider === "muse2api"
+                              ? "Base URL (VD: http://127.0.0.1:18611/v1)"
+                              : "Base URL (VD: http://localhost:11434/v1)"
+                          }
                           value={cfg.baseUrl ?? ""}
                           onChange={(e) => {
                             const next = [...providers]

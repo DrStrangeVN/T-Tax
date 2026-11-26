@@ -1,13 +1,17 @@
 import { generateText, stepCountIs, tool, type ToolSet } from "ai"
 import { z } from "zod"
-import { createLanguageModel } from "./providers.js"
+import { callMuse2ApiChat, createLanguageModel, isProviderUsable } from "./providers.js"
+import type { DocumentAnalysisOutcome } from "./pipeline.js"
 import type {
   AiCopilotAction,
   AiCopilotToolTrace,
   ArApAgingReport,
   CashflowAnalytics,
+  CopilotAttachmentInput,
+  CopilotExtractedBillDraft,
   FixedAssetDTO,
   LLMProviderConfig,
+  LLMProviderType,
   TaxAuditReport,
   TrialBalanceRow,
   WorkspaceDTO
@@ -30,6 +34,10 @@ export interface CopilotToolBackend {
   getArApAging: () => Promise<ArApAgingReport>
   listFixedAssets: () => Promise<FixedAssetDTO[]>
   listCounterparties: () => Promise<Array<Record<string, unknown>>>
+  analyzeAttachment?: (
+    att: CopilotAttachmentInput,
+    preferredProvider?: LLMProviderType
+  ) => Promise<{ outcome: DocumentAnalysisOutcome; savedFileId?: string }>
   externalMcpTools?: CopilotExternalToolDef[]
 }
 
@@ -46,16 +54,172 @@ function fmtVnd(n: number): string {
   return `${Math.round(n).toLocaleString("vi-VN")} đ`
 }
 
+function outcomeToBillDraft(outcome: DocumentAnalysisOutcome, fallbackName: string): CopilotExtractedBillDraft {
+  const f = outcome.extractedFields
+  const totalAmount = Number(f.total ?? 0) || 0
+  const vatAmount = Number(f.vatAmount ?? 0) || 0
+  const preTaxRaw = Number(f.preTaxAmount ?? 0) || 0
+  const preTaxAmount = preTaxRaw > 0 ? preTaxRaw : Math.max(0, totalAmount - vatAmount)
+  return {
+    documentKind: outcome.documentKind,
+    name: String(f.name ?? fallbackName),
+    merchant: f.merchant ? String(f.merchant) : null,
+    merchantTaxCode: f.merchantTaxCode ? String(f.merchantTaxCode) : f.sellerTaxCode ? String(f.sellerTaxCode) : null,
+    issuedAt: f.issuedAt ? String(f.issuedAt) : null,
+    currencyCode: String(f.currencyCode ?? "VND"),
+    preTaxAmount,
+    vatAmount,
+    totalAmount,
+    categoryCode: String(f.categoryCode ?? "other"),
+    paymentMethod: f.paymentMethod ? String(f.paymentMethod) : null,
+    invoiceSymbol: f.invoiceSymbol ? String(f.invoiceSymbol) : null,
+    invoiceNumber: f.invoiceNumber ? String(f.invoiceNumber) : null,
+    amountInWords: outcome.amountInWords ?? null,
+    items: outcome.items,
+    auditIssues: outcome.auditIssues
+  }
+}
+
+function formatBillExtractionMarkdown(draft: CopilotExtractedBillDraft, providerUsed?: string): string {
+  const cur = draft.currencyCode || "VND"
+  const fmtAmt = (v: number) =>
+    cur === "VND" ? fmtVnd(v) : `${v.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${cur}`
+  const lines: string[] = [
+    `### Kết quả bóc tách chứng từ${draft.documentKind === "handwritten_bill" ? " (Hóa đơn viết tay)" : ""}`,
+    `- **Nội dung / Mặt hàng:** **${draft.name}**`,
+    `- **Đơn vị bán / Cửa hàng:** ${draft.merchant || "*(Chưa ghi trên phiếu)*"}${draft.merchantTaxCode ? ` · MST \`${draft.merchantTaxCode}\`` : ""}`,
+    `- **Ngày chứng từ:** ${draft.issuedAt || "*(Chưa rõ ngày)*"} · **Hình thức TT:** ${draft.paymentMethod || "Tiền mặt"}`,
+    `- **Tiền trước thuế:** ${fmtAmt(draft.preTaxAmount ?? 0)} · **VAT:** ${fmtAmt(draft.vatAmount ?? 0)} · **Tổng thanh toán:** **${fmtAmt(draft.totalAmount)}**`,
+    `- **Phân loại đề xuất:** \`${draft.categoryCode || "other"}\`${providerUsed ? ` · *Nguồn: ${providerUsed}*` : ""}`
+  ]
+  if (draft.amountInWords) {
+    lines.push(`- **Bằng chữ:** *${draft.amountInWords}*`)
+  }
+  if (draft.items && draft.items.length > 0) {
+    lines.push(`\n**Chi tiết dòng hàng (${draft.items.length} mục):**`)
+    for (const it of draft.items.slice(0, 12)) {
+      lines.push(`- ${it.name}${it.quantity ? ` (SL: ${it.quantity})` : ""}: **${fmtAmt(it.amount)}**`)
+    }
+    if (draft.items.length > 12) {
+      lines.push(`- *... và ${draft.items.length - 12} dòng hàng khác.*`)
+    }
+  }
+  if (draft.auditIssues && draft.auditIssues.length > 0) {
+    lines.push(`\n**Lưu ý tuân thủ & đối soát:**`)
+    for (const iss of draft.auditIssues) {
+      lines.push(`- **[${iss.severity.toUpperCase()}]** ${iss.message}`)
+    }
+  }
+  return lines.join("\n")
+}
+
+export function buildDeterministicBillAdvice(
+  workspace: WorkspaceDTO,
+  draft: CopilotExtractedBillDraft
+): string {
+  const isHandwritten = draft.documentKind === "handwritten_bill" || draft.documentKind === "printed_receipt"
+  const isCashOver5m =
+    (draft.currencyCode || "VND") === "VND" &&
+    draft.totalAmount >= 5_000_000 &&
+    (!draft.paymentMethod || /tien mat|tiền mặt|cash/i.test(draft.paymentMethod))
+
+  const lines: string[] = [
+    `### Hướng dẫn Hạch toán & Tuân thủ Thuế (${workspace.accountingRegime.replace("_", " ")})`,
+    `- **Phân loại & TK chi phí gợi ý:** Danh mục \`${draft.categoryCode || "other"}\` → Nợ TK chi phí tương ứng (${workspace.accountingRegime === "TT133_2016" ? "6422/154" : "6427/6428/156"})${draft.vatAmount && draft.vatAmount > 0 ? " + Nợ TK 1331 (Thuế GTGT được khấu trừ)" : ""} / Có TK ${isHandwritten ? "1111 (Tiền mặt)" : "1121 hoặc 331"}.`
+  ]
+
+  if (isHandwritten && (!draft.merchantTaxCode || (draft.vatAmount ?? 0) === 0)) {
+    lines.push(
+      `- **Khấu trừ thuế GTGT:** Không có hóa đơn điện tử GTGT nên đặt thuế suất \`KCT\`, không khấu trừ thuế GTGT đầu vào.`
+    )
+    lines.push(
+      `- **Chi phí được trừ TNDN (NĐ 70/2025 & TT 78/96):** Nếu mua hàng/dịch vụ của cá nhân/hộ kinh doanh không xuất HĐĐT, cần lập **Bảng kê thu mua hàng hóa, dịch vụ không có hóa đơn (Mẫu 01/TNDN)** kèm CCCD người bán và chứng từ thanh toán.`
+    )
+  }
+  if (isCashOver5m) {
+    lines.push(
+      `- **Cảnh báo ngưỡng thanh toán không dùng tiền mặt (Luật Thuế GTGT 48/2024/QH15 từ 01/07/2025):** Giá trị **${fmtVnd(draft.totalAmount)}** ≥ 5.000.000 đ — cần ủy nhiệm chi / sao kê chuyển khoản ngân hàng để bảo vệ quyền khấu trừ GTGT và chi phí TNDN.`
+    )
+  }
+  lines.push(
+    `- **Bước tiếp theo:** Kiểm tra lại tên NCC, ngày chứng từ, số tiền rồi bấm **Đưa vào Sổ giao dịch** hoặc mở **Hộp thư AI** để đối chiếu trực tiếp cạnh ảnh gốc.`
+  )
+  return lines.join("\n")
+}
+
+export async function adviseOnDocumentWithAi(params: {
+  workspace: WorkspaceDTO
+  draft: CopilotExtractedBillDraft
+  providers: LLMProviderConfig[]
+  question?: string
+}): Promise<{ advice: string; providerUsed: string }> {
+  const usable = params.providers.filter(isProviderUsable)
+  const q =
+    params.question?.trim() ||
+    "Hãy kiểm tra chứng từ này, hướng dẫn cách hạch toán Nợ/Có chuẩn chế độ kế toán của công ty, tư vấn điều kiện khấu trừ thuế GTGT & chi phí được trừ TNDN, và nêu rõ các rủi ro cần kế toán rà soát."
+
+  const systemPrompt = [
+    `Bạn là Chuyên gia Kế toán trưởng & Tư vấn Thuế Việt Nam (Thông tư 99/2025/TT-BTC, TT200, TT133, Hộ kinh doanh TT88/2026, Luật Thuế GTGT 48/2024/QH15 ngưỡng không dùng tiền mặt 5 triệu từ 01/07/2025, Nghị định 70/2025/NĐ-CP).`,
+    `Đơn vị: ${params.workspace.name} | MST: ${params.workspace.taxCode} | Chế độ KT: ${params.workspace.accountingRegime}.`,
+    `Trả lời ngắn gọn, thực chiến, bằng tiếng Việt, chia rõ 3 mục: (1) Định khoản Nợ/Có đề xuất, (2) Quy định thuế GTGT & TNDN áp dụng, (3) Checklist cần kế toán kiểm tra/bổ sung hồ sơ.`
+  ].join("\n")
+
+  const docContext = JSON.stringify(params.draft, null, 2)
+
+  // Prefer muse2api first if enabled (fast, deep Vietnamese tax reasoning), else follow priority order
+  const ordered = [
+    ...usable.filter((p) => p.provider === "muse2api"),
+    ...usable.filter((p) => p.provider !== "muse2api")
+  ]
+
+  for (const cfg of ordered) {
+    try {
+      if (cfg.provider === "muse2api") {
+        const res = await callMuse2ApiChat({
+          baseUrl: cfg.baseUrl,
+          apiKey: cfg.apiKey,
+          model: cfg.model || "muse-spark",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Thông tin chứng từ đã bóc tách:\n\`\`\`json\n${docContext}\n\`\`\`\n\nYêu cầu: ${q}` }
+          ],
+          timeoutMs: 90_000
+        })
+        return { advice: res.text, providerUsed: `muse2api/${res.model}` }
+      }
+      const model = createLanguageModel(cfg)
+      const res = await generateText({
+        model,
+        system: systemPrompt,
+        prompt: `Thông tin chứng từ đã bóc tách:\n\`\`\`json\n${docContext}\n\`\`\`\n\nYêu cầu: ${q}`
+      })
+      if (res.text.trim()) {
+        return { advice: res.text.trim(), providerUsed: `${cfg.provider}/${cfg.model}` }
+      }
+    } catch {
+      // Try next configured provider
+    }
+  }
+
+  return {
+    advice: buildDeterministicBillAdvice(params.workspace, params.draft),
+    providerUsed: "local-deterministic-engine"
+  }
+}
+
 export async function runTTaxCopilot(params: {
   workspace: WorkspaceDTO
   prompt: string
   history: Array<{ role: "user" | "assistant"; content: string }>
   providers: LLMProviderConfig[]
   backend: CopilotToolBackend
+  attachments?: CopilotAttachmentInput[]
+  preferredProvider?: LLMProviderType
 }): Promise<{
   content: string
   toolTraces: AiCopilotToolTrace[]
   actions: AiCopilotAction[]
+  extractedBill?: CopilotExtractedBillDraft
   providerUsed: string
 }> {
   const toolTraces: AiCopilotToolTrace[] = []
@@ -97,11 +261,242 @@ export async function runTTaxCopilot(params: {
     }
   }
 
-  const enabledProviders = params.providers.filter(
-    (p) => p.enabled !== false && p.model && (p.provider === "openai_compatible" || Boolean(p.apiKey?.trim()))
-  )
+  let enabledProviders = params.providers.filter(isProviderUsable)
+  if (params.preferredProvider) {
+    const pref = enabledProviders.filter((p) => p.provider === params.preferredProvider)
+    const rest = enabledProviders.filter((p) => p.provider !== params.preferredProvider)
+    if (pref.length > 0) enabledProviders = [...pref, ...rest]
+  }
 
-  // 1. Try configured LLM Provider with Vercel AI SDK v7 multi-step Tool Calling (including external MCP tools!)
+  // 0. MULTIMODAL BILL/IMAGE ATTACHMENT FLOW:
+  // User uploaded an invoice/receipt image or PDF directly inside Copilot -> extract verified values + give Vietnamese tax guidance + 1-click entry!
+  if (params.attachments && params.attachments.length > 0) {
+    const primaryAtt = params.attachments[0]!
+    if (params.backend.analyzeAttachment) {
+      const analyzed = await track(
+        "ttax_analyze_bill_attachment",
+        "ttax",
+        { filename: primaryAtt.filename, mediaType: primaryAtt.mediaType, preferredProvider: params.preferredProvider },
+        () => params.backend.analyzeAttachment!(primaryAtt, params.preferredProvider),
+        (r) =>
+          `${r.outcome.extractionMethod.toUpperCase()}${r.outcome.providerUsed ? ` (${r.outcome.providerUsed})` : ""} · Tổng: ${fmtVnd(Number(r.outcome.extractedFields.total ?? 0))}`
+      )
+      const draft = outcomeToBillDraft(analyzed.outcome, primaryAtt.filename)
+      const extractionMd = formatBillExtractionMarkdown(draft, analyzed.outcome.providerUsed)
+
+      // Ask Muse2API / active LLM for tailored accounting & tax guidance on this extracted bill
+      const advisor = await adviseOnDocumentWithAi({
+        workspace: params.workspace,
+        draft,
+        providers: enabledProviders,
+        question: params.prompt
+      })
+
+      actions.push({
+        label: `Ghi nhanh vào Sổ giao dịch (${fmtVnd(draft.totalAmount)})`,
+        kind: "ingest_bill_draft",
+        target: analyzed.savedFileId ? `file:${analyzed.savedFileId}` : "create_tx",
+        payload: {
+          ...draft,
+          savedFileId: analyzed.savedFileId
+        } as unknown as Record<string, unknown>
+      })
+      if (analyzed.savedFileId) {
+        actions.push({
+          label: "Mở trong Hộp thư AI để đối chiếu ảnh",
+          kind: "navigate",
+          target: "unsorted"
+        })
+      }
+
+      return {
+        content: `${extractionMd}\n\n---\n\n${advisor.advice}`,
+        toolTraces,
+        actions,
+        extractedBill: draft,
+        providerUsed: analyzed.outcome.providerUsed || advisor.providerUsed
+      }
+    }
+
+    // Fallback direct Muse2API multimodal chat if no analyzeAttachment hook was wired
+    const museCfg = enabledProviders.find((p) => p.provider === "muse2api")
+    if (museCfg) {
+      try {
+        const cleanB64 = primaryAtt.base64.includes(",") ? primaryAtt.base64.split(",")[1]! : primaryAtt.base64
+        const res = await callMuse2ApiChat({
+          baseUrl: museCfg.baseUrl,
+          apiKey: museCfg.apiKey,
+          model: museCfg.model || "muse-spark",
+          messages: [
+            {
+              role: "system",
+              content: `Bạn là Trợ lý Kế toán Thuế T-Tax (${params.workspace.accountingRegime}). Hãy đọc ảnh hóa đơn/chứng từ đính kèm, trích xuất chính xác số tiền, nhà cung cấp, ngày, danh mục và tư vấn hạch toán bằng tiếng Việt.`
+            },
+            {
+              role: "user",
+              content: params.prompt,
+              attachments: [
+                {
+                  filename: primaryAtt.filename,
+                  mediaType: primaryAtt.mediaType,
+                  buffer: Buffer.from(cleanB64, "base64")
+                }
+              ]
+            }
+          ]
+        })
+        return {
+          content: res.text,
+          toolTraces,
+          actions,
+          providerUsed: `muse2api/${res.model}`
+        }
+      } catch {
+        // Fall through to text handling
+      }
+    }
+  }
+
+  // Helper to collect grounded real SQLite data for providers without native function calling (e.g. Muse2API)
+  const collectGroundedSnapshot = async (): Promise<Record<string, unknown>> => {
+    const qNorm = norm(params.prompt)
+    const wantComprehensive =
+      /tong hop|bao cao|toan dien|de xuat|khuyen nghi|toi uu|ke hoach|danh gia|hieu qua|tinh hinh|phan tich|tat ca/.test(qNorm)
+    const wantAudit = wantComprehensive || /rui ro|kiem toan|bat thuong|trung|tien mat|canh bao|audit|loi|sai sot/.test(qNorm)
+    const wantCashflow = wantComprehensive || /dong tien|du bao|runway|burn|dinh ky|forecast|chi phi lap|tndn|du kien/.test(qNorm)
+    const wantAging = wantComprehensive || /cong no|phai thu|phai tra|qua han|tuoi no|ar|ap|nhac no/.test(qNorm)
+    const wantTrial = wantComprehensive || /can doi|tai khoan|so cai|trial|but toan|1331|1121|331|131|511|642/.test(qNorm)
+    const wantAssets = wantComprehensive || /tai san|tscd|ccdc|khau hao|phan bo|211|242/.test(qNorm)
+    const wantCounterparties = wantComprehensive || /doi tac|nha cung cap|khach hang|mst/.test(qNorm)
+    const wantSearch = /tim |hoa don |hd |so hd|tra cuu /.test(qNorm)
+
+    const snapshot: Record<string, unknown> = {}
+    const tasks: Array<Promise<void>> = [
+      track(
+        "ttax_get_financial_overview",
+        "ttax",
+        {},
+        () => params.backend.getOverview(),
+        (r) => `DT TT: ${fmtVnd(Number(r.revenuePreTax ?? 0))} · CP TT: ${fmtVnd(Number(r.expensePreTax ?? 0))}`
+      ).then((r) => {
+        snapshot.financialOverview = r
+      })
+    ]
+
+    if (wantAudit) {
+      tasks.push(
+        track(
+          "ttax_run_tax_audit",
+          "ttax",
+          {},
+          () => params.backend.runTaxAudit(),
+          (r) => `Điểm tuân thủ ${r.healthScore}/100 · ${r.anomalies.length} phát hiện`
+        ).then((r) => {
+          snapshot.taxAudit = {
+            healthScore: r.healthScore,
+            totalTransactions: r.totalTransactions,
+            summary: r.summary,
+            topAnomalies: r.anomalies.slice(0, 8)
+          }
+          actions.push({ label: "Mở Kiểm toán Rủi ro", kind: "navigate", target: "transactions" })
+        })
+      )
+    }
+    if (wantCashflow) {
+      tasks.push(
+        track(
+          "ttax_get_cashflow_forecast",
+          "ttax",
+          { months: 6 },
+          () => params.backend.getCashflowForecast(6),
+          (r) => `Tiền hiện có: ${fmtVnd(r.currentCashVnd)} · Burn: ${fmtVnd(r.averageMonthlyBurnVnd)}/tháng`
+        ).then((r) => {
+          snapshot.cashflowForecast = r
+        })
+      )
+    }
+    if (wantAging) {
+      tasks.push(
+        track(
+          "ttax_get_ar_ap_aging",
+          "ttax",
+          {},
+          () => params.backend.getArApAging(),
+          (r) => `Phải thu: ${fmtVnd(r.receivableTotal)} · Phải trả: ${fmtVnd(r.payableTotal)}`
+        ).then((r) => {
+          snapshot.arApAging = r
+          actions.push({ label: "Mở Công nợ AR/AP", kind: "open_accounting", target: "aging" })
+        })
+      )
+    }
+    if (wantTrial) {
+      tasks.push(
+        track(
+          "ttax_get_trial_balance",
+          "ttax",
+          {},
+          () => params.backend.getTrialBalance(),
+          (r) => `${r.length} tài khoản phát sinh`
+        ).then((r) => {
+          snapshot.trialBalance = r.slice(0, 20)
+          actions.push({ label: "Mở Bảng Cân đối TK", kind: "open_accounting", target: "trial_balance" })
+        })
+      )
+    }
+    if (wantAssets) {
+      tasks.push(
+        track(
+          "ttax_list_fixed_assets",
+          "ttax",
+          {},
+          () => params.backend.listFixedAssets(),
+          (r) => `${r.length} TSCĐ/CCDC`
+        ).then((r) => {
+          snapshot.fixedAssets = r.slice(0, 15)
+        })
+      )
+    }
+    if (wantCounterparties) {
+      tasks.push(
+        track(
+          "ttax_list_counterparties",
+          "ttax",
+          {},
+          () => params.backend.listCounterparties(),
+          (r) => `${r.length} đối tác MST`
+        ).then((r) => {
+          snapshot.counterparties = r.slice(0, 15)
+        })
+      )
+    }
+    if (wantSearch) {
+      const cleaned = params.prompt.replace(/^(tim|tìm|tra cuu|tra cứu|hoa don|hóa đơn|hd|hđ)\s+/i, "").trim().slice(0, 60)
+      if (cleaned) {
+        tasks.push(
+          track(
+            "ttax_search_transactions",
+            "ttax",
+            { query: cleaned, limit: 10 },
+            () => params.backend.searchTransactions(cleaned, 10),
+            (r) => `Tìm thấy ${Array.isArray(r.rows) ? r.rows.length : 0} giao dịch`
+          ).then((r) => {
+            snapshot.searchMatches = r
+          })
+        )
+      }
+    }
+
+    await Promise.all(tasks)
+    if (actions.length === 0) {
+      actions.push(
+        { label: "Mở Sổ Giao dịch", kind: "navigate", target: "transactions" },
+        { label: "Mở Bảng kê GTGT", kind: "open_accounting", target: "vat" }
+      )
+    }
+    return snapshot
+  }
+
+  // 1. Try configured LLM Providers (Muse2API grounded path OR Vercel AI SDK v7 multi-step Tool Calling)
   if (enabledProviders.length > 0) {
     const tools: ToolSet = {
       ttax_get_financial_overview: tool({
@@ -234,12 +629,44 @@ export async function runTTaxCopilot(params: {
     const systemPrompt = [
       `Bạn là T-Tax AI Copilot — Trợ lý Kế toán trưởng & Chuyên gia Thuế Việt Nam (Thông tư 99/2025/TT-BTC, TT200, TT133, Hộ kinh doanh TT88/2026, Luật Thuế GTGT 48/2024/QH15, Nghị định 70/2025/NĐ-CP).`,
       `Đơn vị đang làm việc: ${params.workspace.name} | MST: ${params.workspace.taxCode} | Chế độ KT: ${params.workspace.accountingRegime} | Ngày hiện tại: ${new Date().toISOString().slice(0, 10)}.`,
-      `LUÔN gọi công cụ (tools) để đọc số liệu thật từ sổ sách SQLite trước khi trả lời — tuyệt đối không bịa số liệu.`,
-      `Trình bày câu trả lời bằng tiếng Việt rõ ràng, ngắn gọn, có số tiền định dạng chuẩn Việt Nam (ví dụ 12.000.000 đ) và gợi ý hành động cụ thể.`
+      `LUÔN dựa trên số liệu thật từ sổ sách SQLite (tuyệt đối không bịa số liệu). Nếu câu hỏi yêu cầu tra cứu quy định thuế/hướng dẫn nghiệp vụ, trả lời đầy đủ, trích dẫn đúng văn bản hiện hành và gắn với chế độ kế toán của đơn vị.`,
+      `Trình bày câu trả lời bằng tiếng Việt rõ ràng, mạch lạc, định dạng số tiền chuẩn Việt Nam (ví dụ 12.000.000 đ) và kết thúc bằng đề xuất hành động cụ thể.`
     ].join("\n")
+
+    let groundedSnapshot: Record<string, unknown> | null = null
 
     for (const cfg of enabledProviders) {
       try {
+        if (cfg.provider === "muse2api") {
+          // Grounding-first Muse2API path (muse.ai does not emit OpenAI function calls, so we inject real SQLite data directly!)
+          if (!groundedSnapshot) {
+            groundedSnapshot = await collectGroundedSnapshot()
+          }
+          const res = await callMuse2ApiChat({
+            baseUrl: cfg.baseUrl,
+            apiKey: cfg.apiKey,
+            model: cfg.model || "muse-spark",
+            messages: [
+              { role: "system", content: systemPrompt },
+              ...params.history.slice(-6).map((m) => ({ role: m.role, content: m.content })),
+              {
+                role: "user",
+                content:
+                  `DỮ LIỆU SỔ SÁCH THẬT TỪ T-TAX SQLITE (${params.workspace.name}, MST ${params.workspace.taxCode}):\n` +
+                  `\`\`\`json\n${JSON.stringify(groundedSnapshot).slice(0, 14_000)}\n\`\`\`\n\n` +
+                  `CÂU HỎI / YÊU CẦU CỦA NGƯỜI DÙNG:\n${params.prompt}`
+              }
+            ],
+            timeoutMs: 120_000
+          })
+          return {
+            content: res.text,
+            toolTraces,
+            actions,
+            providerUsed: `muse2api/${res.model}`
+          }
+        }
+
         const model = createLanguageModel(cfg)
         const result = await generateText({
           model,
@@ -258,7 +685,7 @@ export async function runTTaxCopilot(params: {
           providerUsed: `${cfg.provider}/${cfg.model}`
         }
       } catch {
-        // Fallback to next provider or deterministic local engine
+        // Fallback to next provider (e.g. local Ollama -> Muse2API backup!) or deterministic local engine
       }
     }
   }
@@ -267,13 +694,14 @@ export async function runTTaxCopilot(params: {
   const q = norm(params.prompt)
   const lines: string[] = []
 
-  const wantAudit = /rui ro|kiem toan|bat thuong|trung|tien mat|canh bao|audit|loi|sai sot/.test(q)
-  const wantCashflow = /dong tien|du bao|runway|burn|dinh ky|forecast|chi phi lap|tndn|du kien/.test(q)
-  const wantAging = /cong no|phai thu|phai tra|qua han|tuoi no|ar|ap|nhac no/.test(q)
-  const wantTrial = /can doi|tai khoan|so cai|trial|but toan|1331|1121|331|131|511|642/.test(q)
-  const wantAssets = /tai san|tscd|ccdc|khau hao|phan bo|211|242/.test(q)
-  const wantCounterparties = /doi tac|nha cung cap|khach hang|mst/.test(q)
-  const wantSearch = /tim |hoa don |hd |so hd|tra cuu /.test(q)
+  const wantExecutiveSummary = /tong hop toan dien|tom tat tai chinh|tinh hinh tai chinh/.test(q)
+  const wantAudit = !wantExecutiveSummary && /rui ro|kiem toan|bat thuong|trung|tien mat|canh bao|audit|loi|sai sot/.test(q)
+  const wantCashflow = !wantExecutiveSummary && /dong tien|du bao|runway|burn|dinh ky|forecast|chi phi lap|tndn|du kien/.test(q)
+  const wantAging = !wantExecutiveSummary && /cong no|phai thu|phai tra|qua han|tuoi no|ar|ap|nhac no/.test(q)
+  const wantTrial = !wantExecutiveSummary && /can doi|tai khoan|so cai|trial|but toan|1331|1121|331|131|511|642/.test(q)
+  const wantAssets = !wantExecutiveSummary && /tai san|tscd|ccdc|khau hao|phan bo|211|242/.test(q)
+  const wantCounterparties = !wantExecutiveSummary && /doi tac|nha cung cap|khach hang|mst/.test(q)
+  const wantSearch = !wantExecutiveSummary && /tim |hoa don |hd |so hd|tra cuu /.test(q)
 
   if (wantAudit) {
     const audit = await track(

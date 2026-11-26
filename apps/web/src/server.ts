@@ -9,14 +9,17 @@ import { fileURLToPath } from "node:url"
 import {
   authenticateGdtSession,
   discoverLocalOllamaModels,
+  discoverMuse2Api,
   downloadGdtInvoiceXmlZip,
   fetchGdtCaptcha,
   getHistoricalExchangeRate,
   queryGdtInvoices,
   testProviderVisionSupport,
   type AccountingRegime,
+  type CopilotAttachmentInput,
   type GdtInvoiceSummary,
   type LLMProviderConfig,
+  type LLMProviderType,
   type LineItemDTO,
   type OutgoingInvoiceTemplateData,
   type TransactionDirection
@@ -122,6 +125,8 @@ app.post("/api/rpc", async (c) => {
         return c.json(await testProviderVisionSupport(args[0] as LLMProviderConfig))
       case "discoverOllamaModels":
         return c.json(await discoverLocalOllamaModels(args[0] as string | undefined))
+      case "discoverMuse2Api":
+        return c.json(await discoverMuse2Api(args[0] as string | undefined, args[1] as string | undefined))
       case "listCategories":
         return c.json(service.listCategories(args[0] as string))
       case "upsertCategory":
@@ -165,13 +170,20 @@ app.post("/api/rpc", async (c) => {
       case "analyzeFile": {
         const data = service.getAppData<{ providers?: LLMProviderConfig[] }>(args[0] as string, "llm_providers")
         const providers = (data.providers ?? []).map((p) => ({ ...p, apiKey: decryptStr(p.apiKey) }))
-        return c.json(await service.analyzeFile(args[0] as string, args[1] as string, providers))
+        const opts = args[2] as { preferredProvider?: LLMProviderType } | undefined
+        return c.json(await service.analyzeFile(args[0] as string, args[1] as string, providers, undefined, opts))
+      }
+      case "adviseOnFile": {
+        const data = service.getAppData<{ providers?: LLMProviderConfig[] }>(args[0] as string, "llm_providers")
+        const providers = (data.providers ?? []).map((p) => ({ ...p, apiKey: decryptStr(p.apiKey) }))
+        return c.json(await service.adviseOnFile(args[0] as string, args[1] as string, providers, args[2] as string | undefined))
       }
       case "analyzeFilesBatch": {
         const wsId = args[0] as string
         const data = service.getAppData<{ providers?: LLMProviderConfig[] }>(wsId, "llm_providers")
         const providers = (data.providers ?? []).map((p) => ({ ...p, apiKey: decryptStr(p.apiKey) }))
-        return c.json(await service.analyzeFilesBatch(wsId, args[1] as string[], providers))
+        const opts = args[2] as { preferredProvider?: LLMProviderType } | undefined
+        return c.json(await service.analyzeFilesBatch(wsId, args[1] as string[], providers, undefined, undefined, opts))
       }
       case "cancelBatchAnalyze":
         return c.json({ ok: true })
@@ -370,7 +382,12 @@ app.post("/api/rpc", async (c) => {
         return c.json(service.deleteAiSession(args[0] as string, args[1] as string))
       case "chatWithCopilot": {
         const wsId = args[0] as string
-        const payload = args[1] as { sessionId?: string; prompt: string }
+        const payload = args[1] as {
+          sessionId?: string
+          prompt: string
+          attachments?: CopilotAttachmentInput[]
+          preferredProvider?: LLMProviderType
+        }
         const data = service.getAppData<{ providers?: LLMProviderConfig[] }>(wsId, "llm_providers")
         const providers = (data.providers ?? []).map((p) => ({ ...p, apiKey: decryptStr(p.apiKey) }))
         const externalMcpTools = buildCopilotExternalMcpTools(service.listExternalMcpServers(wsId))
@@ -378,6 +395,8 @@ app.post("/api/rpc", async (c) => {
           await service.chatWithCopilot(wsId, {
             sessionId: payload.sessionId,
             prompt: payload.prompt,
+            attachments: payload.attachments,
+            preferredProvider: payload.preferredProvider,
             providers,
             externalMcpTools
           })

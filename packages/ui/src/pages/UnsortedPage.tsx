@@ -19,11 +19,14 @@ import {
   X,
   ArrowLeftRight,
   Maximize2,
-  ChevronDown
+  ChevronDown,
+  BookOpen,
+  Radio
 } from "lucide-react"
 import type {
   BatchAnalyzeProgressEvent,
   DocumentAnalysisOutcome,
+  LLMProviderType,
   LineItemDTO,
   TransactionDirection,
   UiPreferences,
@@ -120,6 +123,9 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
   const [batchProgress, setBatchProgress] = useState<BatchAnalyzeProgressEvent | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [fxEstimate, setFxEstimate] = useState<{ rate: number; source: string; converted: number } | null>(null)
+  const [hasMuse2Api, setHasMuse2Api] = useState(false)
+  const [fileAdvice, setFileAdvice] = useState<{ advice: string; providerUsed: string } | null>(null)
+  const [advisingFile, setAdvisingFile] = useState(false)
 
   const [form, setForm] = useState({
     name: "",
@@ -154,12 +160,13 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
 
   const loadInbox = useCallback(
     async (preferredId?: string | null) => {
-      const [fList, cats, projs, flds, curs] = await Promise.all([
+      const [fList, cats, projs, flds, curs, provs] = await Promise.all([
         transport.listFiles(workspace.id, true),
         transport.listCategories(workspace.id),
         transport.listProjects(workspace.id),
         transport.listFields(workspace.id),
-        transport.listCurrencies(workspace.id)
+        transport.listCurrencies(workspace.id),
+        transport.getLLMProviders(workspace.id)
       ])
       const typed = fList as unknown as UnsortedFileRow[]
       setFiles(typed)
@@ -167,6 +174,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       setProjects(projs)
       setExtraFields(flds.filter((f) => Boolean(f.isExtra)))
       setCurrencies(curs)
+      setHasMuse2Api(provs.some((p) => p.provider === "muse2api" && p.enabled !== false))
 
       const cur = preferredId ?? selectedIdRef.current
       if (typed.length > 0 && (!cur || !typed.some((x) => x.id === cur))) {
@@ -255,6 +263,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
     setRotateDeg(0)
     setPreviewData({})
     setDebitAccountOverride("")
+    setFileAdvice(null)
 
     if (file.filename.toLowerCase().endsWith(".xml")) {
       transport
@@ -371,17 +380,24 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
     }
   }
 
-  const runAnalyzeSingle = async (fileId: string) => {
+  const runAnalyzeSingle = async (fileId: string, preferredProvider?: LLMProviderType) => {
     setAnalyzingIds((prev) => new Set(prev).add(fileId))
     try {
-      const outcome = await transport.analyzeFile(workspace.id, fileId)
+      const outcome = await transport.analyzeFile(
+        workspace.id,
+        fileId,
+        preferredProvider ? { preferredProvider } : undefined
+      )
       await loadInbox(fileId)
       if (fileId === selectedIdRef.current) {
         setAnalysis(outcome)
         const f = files.find((x) => x.id === fileId)
         applyOutcomeToForm(outcome, f?.filename ?? "Chứng từ")
       }
-      onToast(`Phân tích xong (${outcome.extractionMethod.toUpperCase()})`, "ok")
+      onToast(
+        `Phân tích xong (${outcome.extractionMethod.toUpperCase()}${outcome.providerUsed ? ` · ${outcome.providerUsed}` : ""})`,
+        "ok"
+      )
     } catch (err) {
       onToast(err instanceof Error ? err.message : "Lỗi phân tích AI", "err")
     } finally {
@@ -393,7 +409,20 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
     }
   }
 
-  const runAnalyzeAll = async () => {
+  const handleAdviseSelected = async () => {
+    if (!selectedId || !transport.adviseOnFile) return
+    setAdvisingFile(true)
+    try {
+      const res = await transport.adviseOnFile(workspace.id, selectedId)
+      setFileAdvice(res)
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Không lấy được hướng dẫn AI", "err")
+    } finally {
+      setAdvisingFile(false)
+    }
+  }
+
+  const runAnalyzeAll = async (preferredProvider?: LLMProviderType) => {
     const targets = files.filter((f) => !f.cachedParseResultJson)
     const queue = (targets.length > 0 ? targets : files).map((f) => f.id)
     if (!queue.length) return
@@ -406,13 +435,20 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       status: "running"
     })
     try {
-      const res = await transport.analyzeFilesBatch(workspace.id, queue)
+      const res = await transport.analyzeFilesBatch(
+        workspace.id,
+        queue,
+        preferredProvider ? { preferredProvider } : undefined
+      )
       await loadInbox()
       onRefreshCounts()
       if (res.cancelled) {
         onToast(`Đã dừng sau ${res.done}/${res.total} chứng từ.`, "warn")
       } else {
-        onToast(`Hoàn tất bóc tách ${res.done}/${res.total} chứng từ.`, "ok")
+        onToast(
+          `Hoàn tất bóc tách ${res.done}/${res.total} chứng từ${preferredProvider === "muse2api" ? " (Muse2API)" : ""}.`,
+          "ok"
+        )
       }
     } catch (err) {
       onToast(err instanceof Error ? err.message : "Lỗi chạy hàng loạt", "err")
@@ -899,7 +935,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
                 : "Bấm Bóc tách ngay để đọc XML, gọi AI Vision hoặc OCR cục bộ"}
             </div>
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
             <button
               type="button"
               onClick={() => selectedId && runAnalyzeSingle(selectedId)}
@@ -909,6 +945,30 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
               <RefreshCw size={13} className={isAnalyzingSelected ? "animate-spin" : ""} />
               <span>{isAnalyzingSelected ? "Đang chạy..." : "Bóc tách ngay"}</span>
             </button>
+            {hasMuse2Api && (
+              <button
+                type="button"
+                onClick={() => selectedId && runAnalyzeSingle(selectedId, "muse2api")}
+                disabled={isAnalyzingSelected}
+                title="Đẩy trực tiếp ảnh/PDF sang Muse2API để bóc tách lại chính xác hơn"
+                className="gb"
+              >
+                <Radio size={12.5} className="text-[var(--cyan)]" />
+                <span>Muse2API</span>
+              </button>
+            )}
+            {transport.adviseOnFile && (
+              <button
+                type="button"
+                onClick={() => void handleAdviseSelected()}
+                disabled={advisingFile || isAnalyzingSelected}
+                title="Tra cứu quy định thuế & gợi ý hạch toán Nợ/Có cho chứng từ này"
+                className="gb"
+              >
+                <BookOpen size={12.5} className={advisingFile ? "animate-pulse text-[var(--cyan)]" : "text-[var(--cyan)]"} />
+                <span>{advisingFile ? "Đang tra cứu..." : "Hướng dẫn AI"}</span>
+              </button>
+            )}
             {confirmDeleteId === selectedId ? (
               <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-[var(--rose-s)] border border-[var(--rose)]/40 text-[11px]">
                 <button
@@ -974,6 +1034,29 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Inline AI Tax & Accounting Guidance Card */}
+        {fileAdvice && (
+          <div className="rounded-[12px] border border-[var(--cyan)]/35 bg-[var(--cyan-s)] p-3 space-y-1.5">
+            <div className="flex items-center justify-between gap-2 text-[11.5px] font-semibold text-[var(--cyan)]">
+              <span className="flex items-center gap-1.5">
+                <BookOpen size={13} />
+                <span>Hướng dẫn Hạch toán & Tra cứu Thuế ({fileAdvice.providerUsed})</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setFileAdvice(null)}
+                className="text-[var(--muted)] hover:text-[var(--text)]"
+                title="Đóng hướng dẫn"
+              >
+                <X size={13} />
+              </button>
+            </div>
+            <div className="text-[11.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
+              {fileAdvice.advice}
+            </div>
           </div>
         )}
 
@@ -1363,7 +1446,7 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
           </label>
           <button
             type="button"
-            onClick={runAnalyzeAll}
+            onClick={() => void runAnalyzeAll()}
             disabled={files.length === 0 || Boolean(batchProgress)}
             className="gb hl"
           >
@@ -1374,6 +1457,17 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
                 : `Phân tích tất cả (${files.length})`}
             </span>
           </button>
+          {hasMuse2Api && files.length > 0 && !batchProgress && (
+            <button
+              type="button"
+              onClick={() => void runAnalyzeAll("muse2api")}
+              title="Đẩy hàng loạt sang Muse2API đa tài khoản (4 luồng song song) khi máy cục bộ quá tải"
+              className="gb"
+            >
+              <Radio size={13} className="text-[var(--cyan)]" />
+              <span>Quét Muse2API ({files.length})</span>
+            </button>
+          )}
           {batchProgress && (
             <button type="button" onClick={() => transport.cancelBatchAnalyze()} className="gb text-[var(--rose)]">
               <X size={13} />

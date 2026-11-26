@@ -18,19 +18,25 @@ import {
   ArrowUpRight,
   CheckCircle2,
   AlertTriangle,
-  Clock
+  Clock,
+  Paperclip,
+  Image as ImageIcon,
+  X,
+  FilePlus2
 } from "lucide-react"
 import type {
   AiCopilotAction,
   AiCopilotMessage,
   AiCopilotSession,
   CashflowAnalytics,
+  CopilotAttachmentInput,
   ExternalMcpServerConfig,
+  LLMProviderType,
   McpHostStatus,
   TaxAuditReport,
   WorkspaceDTO
 } from "@t-tax/core/browser"
-import { useTransport } from "../transport/client.js"
+import { useTransport, fileToPayload } from "../transport/client.js"
 import { formatDateVi, formatMoney } from "../utils/format.js"
 
 type CopilotTab = "chat" | "audit" | "forecast" | "mcp"
@@ -46,12 +52,12 @@ interface AiCopilotPageProps {
 }
 
 const QUICK_PROMPTS = [
-  "Tóm tắt tài chính & thuế GTGT kỳ này",
-  "Kiểm toán rủi ro hóa đơn & thanh toán tiền mặt ≥ 5 triệu",
+  "Tổng hợp toàn diện tình hình tài chính, rủi ro thuế & đề xuất tối ưu chi phí",
+  "Tra cứu: Hóa đơn viết tay không MST có được tính chi phí TNDN & cần hồ sơ gì?",
+  "Kiểm toán rủi ro hóa đơn & thanh toán tiền mặt ≥ 5 triệu theo Luật 48/2024",
   "Dự báo dòng tiền, burn rate & runway 6 tháng tới",
-  "Báo cáo công nợ phải thu / phải trả theo tuổi nợ",
-  "Xem Bảng Cân đối Tài khoản VAS hiện tại",
-  "Tổng hợp TSCĐ & CCDC cần trích khấu hao tháng này"
+  "Báo cáo công nợ phải thu / phải trả theo tuổi nợ & đề xuất thu hồi",
+  "Xem Bảng Cân đối Tài khoản VAS & tổng hợp TSCĐ cần trích khấu hao"
 ]
 
 function renderInlineMarkdown(text: string): React.ReactNode[] {
@@ -147,8 +153,17 @@ export function AiCopilotPage({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<AiCopilotMessage[]>([])
   const [promptInput, setPromptInput] = useState("")
+  const [pendingAttachment, setPendingAttachment] = useState<{
+    filename: string
+    mediaType: string
+    base64: string
+    previewUrl?: string
+  } | null>(null)
+  const [preferredProvider, setPreferredProvider] = useState<LLMProviderType | "auto">("auto")
+  const [hasMuse2Api, setHasMuse2Api] = useState(false)
   const [chatBusy, setChatBusy] = useState(false)
   const chatEndRef = useRef<HTMLDivElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Audit state
   const [auditReport, setAuditReport] = useState<TaxAuditReport | null>(null)
@@ -220,8 +235,14 @@ export function AiCopilotPage({
   }, [workspace.id, transport, activeSessionId])
 
   useEffect(() => {
-    if (tab === "chat") loadSessions().catch(() => {})
-  }, [tab, loadSessions])
+    if (tab === "chat") {
+      loadSessions().catch(() => {})
+      transport
+        .getLLMProviders(workspace.id)
+        .then((list) => setHasMuse2Api(list.some((p) => p.provider === "muse2api" && p.enabled !== false)))
+        .catch(() => {})
+    }
+  }, [tab, loadSessions, transport, workspace.id])
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -271,15 +292,37 @@ export function AiCopilotPage({
     else if (tab === "mcp") loadMcp().catch(() => {})
   }, [tab, loadAudit, loadForecast, loadMcp])
 
+  const attachFileToChat = async (file: File) => {
+    if (!/\.(png|jpe?g|webp|heic|pdf)$/i.test(file.name) && !file.type.startsWith("image/") && file.type !== "application/pdf") {
+      onToast("Chỉ hỗ trợ ảnh hóa đơn (JPG, PNG, WebP, HEIC) hoặc PDF.", "warn")
+      return
+    }
+    const payload = await fileToPayload(file)
+    const mime = payload.mimetype || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg")
+    setPendingAttachment({
+      filename: payload.filename,
+      mediaType: mime,
+      base64: payload.base64,
+      previewUrl: mime.startsWith("image/") ? `data:${mime};base64,${payload.base64}` : undefined
+    })
+  }
+
   const sendPrompt = async (textOverride?: string) => {
     const text = (textOverride ?? promptInput).trim()
-    if (!text || chatBusy) return
+    const att = pendingAttachment
+    if ((!text && !att) || chatBusy) return
     setPromptInput("")
+    setPendingAttachment(null)
     setChatBusy(true)
     try {
+      const attachments: CopilotAttachmentInput[] | undefined = att
+        ? [{ filename: att.filename, mediaType: att.mediaType, base64: att.base64 }]
+        : undefined
       const res = await transport.chatWithCopilot(workspace.id, {
         sessionId: activeSessionId ?? undefined,
-        prompt: text
+        prompt: text || "Đọc chính xác ảnh hóa đơn đính kèm, trích xuất các giá trị để nhập liệu và hướng dẫn hạch toán thuế.",
+        attachments,
+        preferredProvider: preferredProvider === "auto" ? undefined : preferredProvider
       })
       setActiveSessionId(res.session.id)
       setSessions((prev) => [res.session, ...prev.filter((s) => s.id !== res.session.id)])
@@ -291,7 +334,46 @@ export function AiCopilotPage({
     }
   }
 
-  const handleCopilotAction = (act: AiCopilotAction) => {
+  const handleCopilotAction = async (act: AiCopilotAction) => {
+    if (act.kind === "ingest_bill_draft" && act.payload) {
+      try {
+        const p = act.payload as Record<string, unknown>
+        const savedFileId = typeof p.savedFileId === "string" ? p.savedFileId : ""
+        const totalAmount = Number(p.totalAmount ?? 0) || 0
+        const vatAmount = Number(p.vatAmount ?? 0) || 0
+        const preTaxAmount = Number(p.preTaxAmount ?? Math.max(0, totalAmount - vatAmount)) || 0
+        const isHandwritten = p.documentKind === "handwritten_bill" || p.documentKind === "printed_receipt"
+        const input = {
+          name: String(p.name ?? "Chứng từ từ Trợ lý AI"),
+          merchant: p.merchant ? String(p.merchant) : "",
+          merchantTaxCode: p.merchantTaxCode ? String(p.merchantTaxCode) : "",
+          direction: "input" as const,
+          invoiceSymbol: p.invoiceSymbol ? String(p.invoiceSymbol) : "",
+          invoiceNumber: p.invoiceNumber ? String(p.invoiceNumber) : "",
+          issuedAt: p.issuedAt ? String(p.issuedAt) : new Date().toISOString().slice(0, 10),
+          currencyCode: String(p.currencyCode ?? workspace.baseCurrency ?? "VND"),
+          preTaxAmount,
+          vatRateCode: vatAmount === 0 && isHandwritten ? "KCT" : "10%",
+          vatAmount,
+          totalAmount,
+          categoryCode: String(p.categoryCode ?? "other"),
+          projectCode: "general",
+          paymentMethod: String(p.paymentMethod ?? (isHandwritten ? "Tiền mặt" : "Chuyển khoản")),
+          note: p.amountInWords ? `Bằng chữ: ${String(p.amountInWords)}` : "Tạo từ ảnh bóc tách AI Copilot",
+          items: Array.isArray(p.items) ? p.items : []
+        }
+        const created = savedFileId
+          ? await transport.approveFileToTransaction(workspace.id, savedFileId, input)
+          : await transport.createTransaction(workspace.id, input)
+        onToast("Đã ghi chứng từ vào Sổ giao dịch & tự động hạch toán VAS!", "ok")
+        if (created && created.id) {
+          onOpenTransaction(String(created.id))
+        }
+      } catch (err) {
+        onToast(err instanceof Error ? err.message : "Không ghi được chứng từ vào sổ", "err")
+      }
+      return
+    }
     if (act.kind === "open_tx") onOpenTransaction(act.target)
     else if (act.kind === "open_accounting") {
       onOpenAccountingTab(act.target as "journal" | "trial_balance" | "vat" | "hkd" | "bank" | "aging" | "assets")
@@ -513,7 +595,7 @@ export function AiCopilotPage({
                     </div>
                     <h2 className="text-[16px] font-bold">Trợ lý Kế toán & Thuế T-Tax AI</h2>
                     <p className="text-[12.5px] text-[var(--muted)]">
-                      Hỏi trực tiếp trên sổ sách SQLite thật (hoạt động ngay cả khi chưa nhập API Key) hoặc nối LLM + MCP mở rộng trong Cài đặt.
+                      Tải ảnh/PDF hóa đơn viết tay để bóc tách giá trị nhập sổ ngay, tra cứu luật thuế VN, tổng hợp báo cáo & đề xuất từ sổ sách SQLite (hỗ trợ Muse2API, Ollama cục bộ & MCP).
                     </p>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -573,9 +655,10 @@ export function AiCopilotPage({
                               <button
                                 key={idx}
                                 type="button"
-                                onClick={() => handleCopilotAction(act)}
-                                className="gb text-[11.5px]"
+                                onClick={() => void handleCopilotAction(act)}
+                                className={act.kind === "ingest_bill_draft" ? "pb text-[11.5px] h-7 px-3" : "gb text-[11.5px]"}
                               >
+                                {act.kind === "ingest_bill_draft" && <FilePlus2 size={12.5} />}
                                 <span>{act.label}</span>
                                 <ArrowUpRight size={12} />
                               </button>
@@ -608,16 +691,89 @@ export function AiCopilotPage({
                 e.preventDefault()
                 void sendPrompt()
               }}
-              className="p-3.5 border-t border-[var(--line)] bg-[var(--sheet-bg)] shrink-0"
+              className="p-3.5 border-t border-[var(--line)] bg-[var(--sheet-bg)] shrink-0 space-y-2"
             >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,.pdf"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) void attachFileToChat(f)
+                  e.target.value = ""
+                }}
+              />
+              {pendingAttachment && (
+                <div className="max-w-[780px] mx-auto flex items-center justify-between gap-2 px-3 py-1.5 rounded-[10px] bg-[var(--panel)] border border-[var(--cyan)]/40 text-[12px]">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {pendingAttachment.previewUrl ? (
+                      <img
+                        src={pendingAttachment.previewUrl}
+                        alt={pendingAttachment.filename}
+                        className="w-8 h-8 rounded-[6px] object-cover border border-[var(--line)] shrink-0"
+                      />
+                    ) : (
+                      <ImageIcon size={16} className="text-[var(--cyan)] shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{pendingAttachment.filename}</div>
+                      <div className="text-[10.5px] text-[var(--muted)]">Sẽ bóc tách giá trị, lưu vào Hộp thư AI & tư vấn hạch toán</div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPendingAttachment(null)}
+                    className="w-6 h-6 rounded-full grid place-items-center text-[var(--muted)] hover:bg-[var(--hover)] shrink-0"
+                    title="Gỡ tệp đính kèm"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )}
               <div className="max-w-[780px] mx-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={chatBusy}
+                  title="Tải ảnh hoặc PDF hóa đơn để đọc & nhập liệu"
+                  className="gb h-10 px-3 shrink-0"
+                >
+                  <Paperclip size={14} />
+                  <span className="hidden sm:inline">Ảnh HĐ</span>
+                </button>
                 <input
                   value={promptInput}
                   onChange={(e) => setPromptInput(e.target.value)}
-                  placeholder="Hỏi về thuế GTGT, rủi ro hóa đơn, công nợ, dòng tiền, số dư tài khoản VAS..."
+                  onPaste={(e) => {
+                    const imgFile = Array.from(e.clipboardData?.files ?? []).find(
+                      (f) => f.type.startsWith("image/") || f.type === "application/pdf"
+                    )
+                    if (imgFile) {
+                      e.preventDefault()
+                      void attachFileToChat(imgFile)
+                    }
+                  }}
+                  placeholder={
+                    pendingAttachment
+                      ? "Hỏi thêm về hóa đơn này (hoặc bấm Gửi để tự bóc tách & tư vấn hạch toán)..."
+                      : "Hỏi luật thuế VN, tổng hợp báo cáo, đề xuất, hoặc dán/tải ảnh hóa đơn viết tay..."
+                  }
                   className="flex-1 h-10 px-3.5 rounded-[11px] bg-[var(--raised)] border border-[var(--line)] text-[13px] outline-none focus:border-[var(--cyan)]"
                 />
-                <button type="submit" disabled={chatBusy || !promptInput.trim()} className="gb gb-p h-10 px-4">
+                {hasMuse2Api && (
+                  <select
+                    value={preferredProvider}
+                    onChange={(e) => setPreferredProvider(e.target.value as LLMProviderType | "auto")}
+                    title="Chọn bộ máy AI xử lý"
+                    className="h-10 px-2.5 rounded-[11px] bg-[var(--raised)] border border-[var(--line)] text-[11.5px] shrink-0"
+                  >
+                    <option value="auto" className="bg-[var(--panel-solid)]">AI Tự động</option>
+                    <option value="muse2api" className="bg-[var(--panel-solid)]">Muse2API</option>
+                    <option value="openai_compatible" className="bg-[var(--panel-solid)]">Ollama cục bộ</option>
+                  </select>
+                )}
+                <button type="submit" disabled={chatBusy || (!promptInput.trim() && !pendingAttachment)} className="gb gb-p h-10 px-4 shrink-0">
                   <Send size={14} />
                   <span>Gửi</span>
                 </button>

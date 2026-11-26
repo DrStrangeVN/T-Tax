@@ -171,10 +171,11 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator("text=MacBook Pro M4 Demo").first()).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "05d-accounting-assets.png") })
 
-    // 6b. Verify AI Copilot, Tax Risk Audit, Cashflow Forecast & MCP Hub
+    // 6b. Verify AI Copilot (with Image Upload button), Tax Risk Audit, Cashflow Forecast & MCP Hub
     await page.click('[data-nav="copilot"]')
     await expect(page.locator("text=Trợ lý Kế toán & Thuế T-Tax AI").first()).toBeVisible({ timeout: 10_000 })
-    await page.click('button:has-text("Tóm tắt tài chính & thuế GTGT kỳ này")')
+    await expect(page.locator('button:has-text("Ảnh HĐ")').first()).toBeVisible({ timeout: 5_000 })
+    await page.click('button:has-text("Tổng hợp toàn diện tình hình tài chính")')
     await expect(page.locator("text=ttax_get_financial_overview").first()).toBeVisible({ timeout: 10_000 })
     await page.screenshot({ path: join(shotDir, "12-ai-copilot-chat.png") })
 
@@ -237,6 +238,7 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator("text=Khóa sổ Kỳ kế toán").first()).toBeVisible({ timeout: 5_000 })
     await page.screenshot({ path: join(shotDir, "10-settings.png") })
     await page.click('button:has-text("AI & Prompt")')
+    await expect(page.locator('button:has-text("Quét Muse2API cục bộ")').first()).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('button:has-text("Quét Ollama cục bộ")').first()).toBeVisible({ timeout: 5_000 })
     await page.screenshot({ path: join(shotDir, "10b-settings-ai.png") })
 

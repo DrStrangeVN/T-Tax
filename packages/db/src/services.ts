@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm"
 import {
   HKD_TAX_SECTORS,
+  adviseOnDocumentWithAi,
   analyzeDocumentHybrid,
   applyColumnMapping,
   auditParsedEInvoice,
@@ -47,6 +48,8 @@ import {
   type BankMatchItem,
   type BatchAnalyzeProgressEvent,
   type CashflowAnalytics,
+  type CopilotAttachmentInput,
+  type CopilotExtractedBillDraft,
   type CopilotExternalToolDef,
   type DocumentAnalysisOutcome,
   type ExportInvoiceRow,
@@ -55,6 +58,7 @@ import {
   type FxCacheAdapter,
   type HkdTaxSectorCode,
   type LLMProviderConfig,
+  type LLMProviderType,
   type LineItemDTO,
   type OpeningBalanceRow,
   type OutgoingInvoiceTemplateData,
@@ -585,7 +589,8 @@ export class TTaxService {
     workspaceId: string,
     fileId: string,
     providers: LLMProviderConfig[],
-    onRateLimit?: () => void
+    onRateLimit?: () => void,
+    opts?: { preferredProvider?: LLMProviderType }
   ): Promise<DocumentAnalysisOutcome> {
     const ws = this.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get()
     const file = this.db
@@ -629,6 +634,7 @@ export class TTaxService {
       imageFormat: (settingsMap.llm_attachment_format as AttachmentImageFormat) || "webp",
       existingUniqueKeys: existingKeys,
       nonCashThresholdVnd: Number.isFinite(threshold) ? threshold : 20_000_000,
+      preferredProvider: opts?.preferredProvider,
       onRateLimit
     })
 
@@ -1019,13 +1025,18 @@ export class TTaxService {
     fileIds: string[],
     providers: LLMProviderConfig[],
     onProgress?: (ev: BatchAnalyzeProgressEvent) => void,
-    shouldCancel?: () => boolean
+    shouldCancel?: () => boolean,
+    opts?: { preferredProvider?: LLMProviderType }
   ) {
     const jobId = randomUUID()
     const uniqueIds = [...new Set(fileIds)]
     const total = uniqueIds.length
-    const enabledCloud = providers.filter((p) => p.enabled !== false && (p.apiKey || p.baseUrl))
-    const concurrency = Math.max(1, Math.min(4, enabledCloud[0]?.maxConcurrency ?? 3))
+    const enabledCloud = providers.filter((p) => p.enabled !== false && (p.apiKey || p.baseUrl || p.provider === "muse2api"))
+    const primary = opts?.preferredProvider
+      ? enabledCloud.find((p) => p.provider === opts.preferredProvider) ?? enabledCloud[0]
+      : enabledCloud[0]
+    const defaultConc = primary?.provider === "muse2api" ? 4 : primary?.provider === "openai_compatible" ? 1 : 3
+    const concurrency = Math.max(1, Math.min(4, primary?.maxConcurrency ?? defaultConc))
     let cursor = 0
     let done = 0
     let cancelled = false
@@ -1042,7 +1053,7 @@ export class TTaxService {
         const file = this.db.select({ filename: schema.files.filename }).from(schema.files).where(eq(schema.files.id, fileId)).get()
         const fname = file?.filename ?? fileId
         try {
-          await this.analyzeFile(workspaceId, fileId, providers)
+          await this.analyzeFile(workspaceId, fileId, providers, undefined, opts)
           done++
           onProgress?.({ jobId, done, total, currentFileId: fileId, currentFilename: fname, status: "running" })
         } catch (err) {
@@ -3548,6 +3559,63 @@ export class TTaxService {
     return true
   }
 
+  async adviseOnFile(
+    workspaceId: string,
+    fileId: string,
+    providers: LLMProviderConfig[],
+    question?: string
+  ): Promise<{ advice: string; providerUsed: string }> {
+    const ws = this.listWorkspaces().find((w) => w.id === workspaceId)
+    const file = this.db
+      .select()
+      .from(schema.files)
+      .where(and(eq(schema.files.id, fileId), eq(schema.files.workspaceId, workspaceId)))
+      .get()
+    if (!ws || !file) throw new Error("Không tìm thấy chứng từ.")
+
+    let outcome: DocumentAnalysisOutcome | null = null
+    if (file.cachedParseResultJson) {
+      try {
+        outcome = JSON.parse(file.cachedParseResultJson) as DocumentAnalysisOutcome
+      } catch {
+        outcome = null
+      }
+    }
+    if (!outcome) {
+      outcome = await this.analyzeFile(workspaceId, fileId, providers)
+    }
+
+    const f = outcome.extractedFields
+    const totalAmount = Number(f.total ?? 0) || 0
+    const vatAmount = Number(f.vatAmount ?? 0) || 0
+    const preTaxRaw = Number(f.preTaxAmount ?? 0) || 0
+    const draft: CopilotExtractedBillDraft = {
+      documentKind: outcome.documentKind,
+      name: String(f.name ?? file.filename),
+      merchant: f.merchant ? String(f.merchant) : null,
+      merchantTaxCode: f.merchantTaxCode ? String(f.merchantTaxCode) : f.sellerTaxCode ? String(f.sellerTaxCode) : null,
+      issuedAt: f.issuedAt ? String(f.issuedAt) : null,
+      currencyCode: String(f.currencyCode ?? ws.baseCurrency ?? "VND"),
+      preTaxAmount: preTaxRaw > 0 ? preTaxRaw : Math.max(0, totalAmount - vatAmount),
+      vatAmount,
+      totalAmount,
+      categoryCode: String(f.categoryCode ?? "other"),
+      paymentMethod: f.paymentMethod ? String(f.paymentMethod) : null,
+      invoiceSymbol: f.invoiceSymbol ? String(f.invoiceSymbol) : null,
+      invoiceNumber: f.invoiceNumber ? String(f.invoiceNumber) : null,
+      amountInWords: outcome.amountInWords ?? null,
+      items: outcome.items,
+      auditIssues: outcome.auditIssues
+    }
+
+    return adviseOnDocumentWithAi({
+      workspace: ws as unknown as WorkspaceDTO,
+      draft,
+      providers,
+      question
+    })
+  }
+
   async chatWithCopilot(
     workspaceId: string,
     params: {
@@ -3555,6 +3623,8 @@ export class TTaxService {
       prompt: string
       providers?: LLMProviderConfig[]
       externalMcpTools?: CopilotExternalToolDef[]
+      attachments?: CopilotAttachmentInput[]
+      preferredProvider?: LLMProviderType
     }
   ): Promise<{
     session: AiCopilotSession
@@ -3563,8 +3633,11 @@ export class TTaxService {
   }> {
     const ws = this.listWorkspaces().find((w) => w.id === workspaceId)
     if (!ws) throw new Error("Workspace không tồn tại.")
-    const promptText = params.prompt.trim()
-    if (!promptText) throw new Error("Vui lòng nhập câu hỏi cho Trợ lý AI.")
+    const hasAttachments = Boolean(params.attachments && params.attachments.length > 0)
+    const promptText =
+      params.prompt.trim() ||
+      (hasAttachments ? "Đọc chính xác hóa đơn đính kèm, trích xuất giá trị để nhập liệu và hướng dẫn hạch toán thuế." : "")
+    if (!promptText) throw new Error("Vui lòng nhập câu hỏi hoặc đính kèm ảnh chứng từ cho Trợ lý AI.")
 
     const now = new Date().toISOString()
     let session = params.sessionId
@@ -3577,7 +3650,7 @@ export class TTaxService {
 
     if (!session) {
       const sid = randomUUID()
-      const title = promptText.slice(0, 64)
+      const title = (hasAttachments ? `[Ảnh] ${params.attachments![0]!.filename} — ${promptText}` : promptText).slice(0, 64)
       this.db
         .insert(schema.aiChatSessions)
         .values({ id: sid, workspaceId, title, createdAt: now, updatedAt: now })
@@ -3590,18 +3663,25 @@ export class TTaxService {
 
     const priorMsgs = this.listAiMessages(session.id).map((m) => ({ role: m.role, content: m.content }))
 
+    const userDisplayContent = hasAttachments
+      ? `[Đính kèm: ${params.attachments!.map((a) => a.filename).join(", ")}]\n${promptText}`
+      : promptText
+
     const userMsgId = randomUUID()
     const userTs = new Date().toISOString()
     this.db
       .insert(schema.aiChatMessages)
-      .values({ id: userMsgId, sessionId: session.id, role: "user", content: promptText, createdAt: userTs })
+      .values({ id: userMsgId, sessionId: session.id, role: "user", content: userDisplayContent, createdAt: userTs })
       .run()
 
+    const providers = params.providers ?? []
     const aiOut = await runTTaxCopilot({
       workspace: ws as unknown as WorkspaceDTO,
       prompt: promptText,
       history: priorMsgs,
-      providers: params.providers ?? [],
+      providers,
+      attachments: params.attachments,
+      preferredProvider: params.preferredProvider,
       backend: {
         getOverview: async (dateFrom, dateTo) => this.getDashboardStats(workspaceId, dateFrom, dateTo) as unknown as Record<string, unknown>,
         searchTransactions: async (query, limit) => this.listTransactions(workspaceId, { search: query, limit: limit ?? 10 }) as unknown as Record<string, unknown>,
@@ -3611,6 +3691,40 @@ export class TTaxService {
         getArApAging: async () => this.getArApAging(workspaceId),
         listFixedAssets: async () => this.listFixedAssets(workspaceId),
         listCounterparties: async () => this.listCounterparties(workspaceId) as unknown as Array<Record<string, unknown>>,
+        analyzeAttachment: async (att, preferredProv) => {
+          const rawB64 = att.base64.includes(",") ? att.base64.split(",")[1]! : att.base64
+          const buf = Buffer.from(rawB64, "base64")
+          // Archive the uploaded bill image into the Vault / Hộp thư AI so user can verify side-by-side or post immediately!
+          const ingested = await this.ingestFiles(
+            workspaceId,
+            [{ filename: att.filename, mimetype: att.mediaType, buffer: buf }],
+            "upload"
+          )
+          const savedFileId = ingested.createdFiles[0]?.id
+          if (savedFileId) {
+            const outcome = await this.analyzeFile(workspaceId, savedFileId, providers, undefined, {
+              preferredProvider: preferredProv
+            })
+            return { outcome, savedFileId }
+          }
+          // Duplicate file already in vault -> still analyze buffer directly so user gets immediate answer
+          const settingsMap = this.getSettings(workspaceId)
+          const outcome = await analyzeDocumentHybrid({
+            filename: att.filename,
+            mimetype: att.mediaType,
+            buffer: buf,
+            providers,
+            fields: this.listFields(workspaceId),
+            categories: this.listCategories(workspaceId),
+            projects: this.listProjects(workspaceId),
+            accounts: this.listAccounts(workspaceId, ws.accountingRegime as AccountingRegime),
+            smartRules: this.listSmartRules(workspaceId),
+            regime: ws.accountingRegime,
+            promptTemplate: settingsMap.prompt_analyse_new_file,
+            preferredProvider: preferredProv
+          })
+          return { outcome }
+        },
         externalMcpTools: params.externalMcpTools
       }
     })
@@ -3639,7 +3753,8 @@ export class TTaxService {
         id: userMsgId,
         sessionId: session.id,
         role: "user",
-        content: promptText,
+        content: userDisplayContent,
+        attachments: params.attachments?.map((a) => ({ filename: a.filename, mediaType: a.mediaType })),
         createdAt: userTs
       },
       assistantMessage: {
@@ -3649,6 +3764,7 @@ export class TTaxService {
         content: aiOut.content,
         toolTraces: aiOut.toolTraces,
         actions: aiOut.actions,
+        extractedBill: aiOut.extractedBill,
         providerUsed: aiOut.providerUsed,
         createdAt: asstTs
       }

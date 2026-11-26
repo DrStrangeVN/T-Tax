@@ -15,6 +15,7 @@ import {
 import { buildDynamicAnalyzeSchema } from "./schema-builder.js"
 import {
   discoverLocalOllamaModels,
+  isProviderUsable,
   requestFlexibleJsonWithFallback,
   type LLMAttachment
 } from "./providers.js"
@@ -175,6 +176,7 @@ export async function analyzeDocumentHybrid(params: {
   imageFormat?: AttachmentImageFormat
   existingUniqueKeys?: Set<string>
   nonCashThresholdVnd?: number
+  preferredProvider?: import("../types.js").LLMProviderType
   onRateLimit?: () => void
 }): Promise<DocumentAnalysisOutcome> {
   const isXml =
@@ -251,10 +253,15 @@ export async function analyzeDocumentHybrid(params: {
     }
   }
 
-  // Resolve effective providers (auto-discover local Ollama vision model when none configured!)
-  let activeProviders = params.providers.filter(
-    (p) => p.enabled !== false && Boolean(p.model) && (p.provider === "openai_compatible" || Boolean(p.apiKey))
-  )
+  // Resolve effective providers (respecting priority order & optional preferredProvider override; auto-discover Ollama if none configured)
+  let activeProviders = params.providers.filter(isProviderUsable)
+  if (params.preferredProvider) {
+    const preferred = activeProviders.filter((p) => p.provider === params.preferredProvider)
+    const others = activeProviders.filter((p) => p.provider !== params.preferredProvider)
+    if (preferred.length > 0) {
+      activeProviders = [...preferred, ...others]
+    }
+  }
   if (activeProviders.length === 0) {
     const discovered = await discoverLocalOllamaModels()
     if (discovered.reachable && discovered.bestVisionModel) {
@@ -270,10 +277,13 @@ export async function analyzeDocumentHybrid(params: {
     }
   }
 
-  // Local OpenAI-compatible VLMs (Ollama/LM Studio) work fastest & most reliably with 1024px JPEG
-  const prefersLocalJpeg = activeProviders.length > 0 && activeProviders[0]!.provider === "openai_compatible"
-  const effectiveFormat: AttachmentImageFormat = prefersLocalJpeg ? "jpeg" : params.imageFormat ?? "webp"
-  const effectiveMaxDim = prefersLocalJpeg ? 1024 : 1800
+  // Local Ollama works best with 1024px JPEG + compact prompt; Muse2API handles 1600px JPEG + rich prompt cleanly!
+  const firstProv = activeProviders[0]?.provider
+  const prefersLocalCompact = firstProv === "openai_compatible"
+  const prefersMuseJpeg = firstProv === "muse2api"
+  const effectiveFormat: AttachmentImageFormat =
+    prefersLocalCompact || prefersMuseJpeg ? "jpeg" : params.imageFormat ?? "webp"
+  const effectiveMaxDim = prefersLocalCompact ? 1024 : prefersMuseJpeg ? 1600 : 1800
 
   // TIER 1 & 2: PDF or Image preprocessing (with auto-orientation + handwriting ink enhancement)
   const isPdf = params.filename.toLowerCase().endsWith(".pdf") || params.mimetype === "application/pdf"
@@ -318,7 +328,7 @@ export async function analyzeDocumentHybrid(params: {
       ? DEFAULT_ANALYZE_PROMPT_TEMPLATE
       : params.promptTemplate
 
-  const prompt = prefersLocalJpeg
+  const prompt = prefersLocalCompact
     ? buildCompactLocalVlmPrompt({ categories: params.categories })
     : buildAnalyzePrompt(useTemplate, {
         fields: params.fields,
@@ -338,14 +348,14 @@ export async function analyzeDocumentHybrid(params: {
     try {
       const llmRes = await requestFlexibleJsonWithFallback(activeProviders, {
         prompt,
-        schema: prefersLocalJpeg ? undefined : schema,
+        schema: prefersLocalCompact || prefersMuseJpeg ? undefined : schema,
         attachments,
         textContext: pdfTextContext,
         onRateLimit: params.onRateLimit
       })
       rawOutput = llmRes.output
       tokensUsed = llmRes.tokensUsed
-      providerUsed = `${llmRes.provider}:${llmRes.model}`
+      providerUsed = `${llmRes.provider}:${llmRes.model}${llmRes.backupUsed ? " (backup)" : ""}`
     } catch (llmErr) {
       // TIER 3 fallback: if all VLM providers fail and we have an image or PDF text, try local offline OCR!
       const ocrText = pdfTextContext || (attachments[0] ? await runLocalTesseractOcr(attachments[0].buffer) : "")

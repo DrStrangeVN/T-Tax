@@ -251,7 +251,7 @@ export interface LegalRule {
   payload: Record<string, unknown>
 }
 
-export type LLMProviderType = "openai" | "google" | "mistral" | "anthropic" | "openai_compatible"
+export type LLMProviderType = "openai" | "google" | "mistral" | "anthropic" | "muse2api" | "openai_compatible"
 
 export interface LLMProviderConfig {
   provider: LLMProviderType
@@ -260,6 +260,46 @@ export interface LLMProviderConfig {
   baseUrl?: string
   maxConcurrency?: number
   enabled?: boolean
+}
+
+export interface Muse2ApiDiscoveryResult {
+  reachable: boolean
+  baseUrl: string
+  version?: string
+  accountsTotal: number
+  validAccounts: number
+  browserRunning: boolean
+  visionSupported: boolean
+  authRequired: boolean
+  authValid: boolean
+  models: Array<{ id: string; description?: string; vision?: boolean }>
+  recommendedModel: string
+  message: string
+}
+
+export interface CopilotAttachmentInput {
+  filename: string
+  mediaType: string
+  base64: string
+}
+
+export interface CopilotExtractedBillDraft {
+  documentKind?: DocumentKind
+  name: string
+  merchant?: string | null
+  merchantTaxCode?: string | null
+  issuedAt?: string | null
+  currencyCode?: string
+  preTaxAmount?: number
+  vatAmount?: number
+  totalAmount: number
+  categoryCode?: string
+  paymentMethod?: string | null
+  invoiceSymbol?: string | null
+  invoiceNumber?: string | null
+  amountInWords?: string | null
+  items?: LineItemDTO[]
+  auditIssues?: AuditIssue[]
 }
 
 export interface AnalyzeProgressCounts {
@@ -459,8 +499,9 @@ export interface AiCopilotToolTrace {
 
 export interface AiCopilotAction {
   label: string
-  kind: "navigate" | "open_tx" | "open_accounting" | "open_counterparty"
+  kind: "navigate" | "open_tx" | "open_accounting" | "open_counterparty" | "ingest_bill_draft"
   target: string
+  payload?: Record<string, unknown>
 }
 
 export interface AiCopilotMessage {
@@ -470,6 +511,8 @@ export interface AiCopilotMessage {
   content: string
   toolTraces?: AiCopilotToolTrace[]
   actions?: AiCopilotAction[]
+  attachments?: Array<{ filename: string; mediaType: string }>
+  extractedBill?: CopilotExtractedBillDraft
   providerUsed?: string
   createdAt: string
 }

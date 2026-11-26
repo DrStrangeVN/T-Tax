@@ -7,6 +7,7 @@ import { tmpdir } from "node:os"
 import {
   authenticateGdtSession,
   discoverLocalOllamaModels,
+  discoverMuse2Api,
   downloadGdtInvoiceXmlZip,
   fetchGdtCaptcha,
   getHistoricalExchangeRate,
@@ -14,8 +15,10 @@ import {
   safeAsciiFilename,
   testProviderVisionSupport,
   type AccountingRegime,
+  type CopilotAttachmentInput,
   type GdtInvoiceSummary,
   type LLMProviderConfig,
+  type LLMProviderType,
   type LineItemDTO,
   type OutgoingInvoiceTemplateData,
   type ParsedEInvoice,
@@ -149,6 +152,8 @@ export function registerIpcHandlers(params: {
         return testProviderVisionSupport(args[0] as LLMProviderConfig)
       case "discoverOllamaModels":
         return discoverLocalOllamaModels(args[0] as string | undefined)
+      case "discoverMuse2Api":
+        return discoverMuse2Api(args[0] as string | undefined, args[1] as string | undefined)
 
       case "listCategories":
         return service.listCategories(args[0] as string)
@@ -205,12 +210,21 @@ export function registerIpcHandlers(params: {
       case "analyzeFile": {
         const wsId = args[0] as string
         const fileId = args[1] as string
+        const opts = args[2] as { preferredProvider?: LLMProviderType } | undefined
         const providers = getDecryptedProviders(wsId)
-        return service.analyzeFile(wsId, fileId, providers)
+        return service.analyzeFile(wsId, fileId, providers, undefined, opts)
+      }
+      case "adviseOnFile": {
+        const wsId = args[0] as string
+        const fileId = args[1] as string
+        const question = args[2] as string | undefined
+        const providers = getDecryptedProviders(wsId)
+        return service.adviseOnFile(wsId, fileId, providers, question)
       }
       case "analyzeFilesBatch": {
         const wsId = args[0] as string
         const fileIds = args[1] as string[]
+        const opts = args[2] as { preferredProvider?: LLMProviderType } | undefined
         const providers = getDecryptedProviders(wsId)
         batchCancelled = false
         return service.analyzeFilesBatch(
@@ -223,7 +237,8 @@ export function registerIpcHandlers(params: {
               win.webContents.send("ttax:batch-progress", ev)
             }
           },
-          () => batchCancelled
+          () => batchCancelled,
+          opts
         )
       }
       case "cancelBatchAnalyze": {
@@ -642,16 +657,27 @@ export function registerIpcHandlers(params: {
         return service.deleteAiSession(args[0] as string, args[1] as string)
       case "chatWithCopilot": {
         const wsId = args[0] as string
-        const payload = args[1] as { sessionId?: string; prompt: string }
+        const payload = args[1] as {
+          sessionId?: string
+          prompt: string
+          attachments?: CopilotAttachmentInput[]
+          preferredProvider?: LLMProviderType
+        }
         const providers = getDecryptedProviders(wsId)
         const externalServers = service.listExternalMcpServers(wsId)
         const externalMcpTools = buildCopilotExternalMcpTools(externalServers)
-        return service.chatWithCopilot(wsId, {
+        const res = await service.chatWithCopilot(wsId, {
           sessionId: payload.sessionId,
           prompt: payload.prompt,
+          attachments: payload.attachments,
+          preferredProvider: payload.preferredProvider,
           providers,
           externalMcpTools
         })
+        if (payload.attachments && payload.attachments.length > 0) {
+          params.onCountsChanged()
+        }
+        return res
       }
       case "getMcpCatalog":
         return {

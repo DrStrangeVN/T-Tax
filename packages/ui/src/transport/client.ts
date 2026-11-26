@@ -8,6 +8,7 @@ import type {
   AuditIssue,
   BatchAnalyzeProgressEvent,
   CashflowAnalytics,
+  CopilotAttachmentInput,
   DocumentAnalysisOutcome,
   ExternalMcpServerConfig,
   FixedAssetDTO,
@@ -15,8 +16,10 @@ import type {
   GdtInvoiceSummary,
   HkdTaxSectorCode,
   LLMProviderConfig,
+  LLMProviderType,
   LineItemDTO,
   McpHostStatus,
+  Muse2ApiDiscoveryResult,
   OpeningBalanceRow,
   OutgoingInvoiceTemplateData,
   ParsedEInvoice,
@@ -86,6 +89,7 @@ export interface TTaxTransport {
     models: Array<{ name: string; isVision: boolean; sizeBytes: number; family?: string }>
     bestVisionModel?: string
   }>
+  discoverMuse2Api?: (baseUrl?: string, apiKey?: string) => Promise<Muse2ApiDiscoveryResult>
 
   // Metadata
   listCategories: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
@@ -115,8 +119,21 @@ export interface TTaxTransport {
     signatureVerification?: XmlSignatureVerification
   }>
   renderXmlHtmlPreview: (workspaceId: string, fileId: string) => Promise<string>
-  analyzeFile: (workspaceId: string, fileId: string) => Promise<DocumentAnalysisOutcome>
-  analyzeFilesBatch: (workspaceId: string, fileIds: string[]) => Promise<{ jobId: string; done: number; total: number; cancelled: boolean }>
+  analyzeFile: (
+    workspaceId: string,
+    fileId: string,
+    opts?: { preferredProvider?: LLMProviderType }
+  ) => Promise<DocumentAnalysisOutcome>
+  adviseOnFile?: (
+    workspaceId: string,
+    fileId: string,
+    question?: string
+  ) => Promise<{ advice: string; providerUsed: string }>
+  analyzeFilesBatch: (
+    workspaceId: string,
+    fileIds: string[],
+    opts?: { preferredProvider?: LLMProviderType }
+  ) => Promise<{ jobId: string; done: number; total: number; cancelled: boolean }>
   cancelBatchAnalyze: () => Promise<void>
   batchApproveCleanXml: (workspaceId: string, fileIds: string[]) => Promise<{ approved: number; skipped: number }>
   approveFileToTransaction: (workspaceId: string, fileId: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>
@@ -288,7 +305,12 @@ export interface TTaxTransport {
   deleteAiSession: (workspaceId: string, sessionId: string) => Promise<boolean>
   chatWithCopilot: (
     workspaceId: string,
-    params: { sessionId?: string; prompt: string }
+    params: {
+      sessionId?: string
+      prompt: string
+      attachments?: CopilotAttachmentInput[]
+      preferredProvider?: LLMProviderType
+    }
   ) => Promise<{ session: AiCopilotSession; userMessage: AiCopilotMessage; assistantMessage: AiCopilotMessage }>
   getMcpCatalog: () => Promise<{
     version: string
@@ -419,6 +441,7 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     saveLLMProviders: (wsId, providers) => post("/rpc", { method: "saveLLMProviders", args: [wsId, providers] }),
     testLLMProvider: (config) => post("/rpc", { method: "testLLMProvider", args: [config] }),
     discoverOllamaModels: (baseUrl) => post("/rpc", { method: "discoverOllamaModels", args: [baseUrl] }),
+    discoverMuse2Api: (baseUrl, apiKey) => post("/rpc", { method: "discoverMuse2Api", args: [baseUrl, apiKey] }),
     listCategories: (wsId) => post("/rpc", { method: "listCategories", args: [wsId] }),
     upsertCategory: (wsId, d) => post("/rpc", { method: "upsertCategory", args: [wsId, d] }),
     deleteCategory: (wsId, id) => post("/rpc", { method: "deleteCategory", args: [wsId, id] }),
@@ -435,8 +458,9 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     listFiles: (wsId, unreviewedOnly) => post("/rpc", { method: "listFiles", args: [wsId, unreviewedOnly] }),
     readFilePreview: (wsId, fileId) => post("/rpc", { method: "readFilePreview", args: [wsId, fileId] }),
     renderXmlHtmlPreview: (wsId, fileId) => post("/rpc", { method: "renderXmlHtmlPreview", args: [wsId, fileId] }),
-    analyzeFile: (wsId, fileId) => post("/rpc", { method: "analyzeFile", args: [wsId, fileId] }),
-    analyzeFilesBatch: (wsId, fileIds) => post("/rpc", { method: "analyzeFilesBatch", args: [wsId, fileIds] }),
+    analyzeFile: (wsId, fileId, opts) => post("/rpc", { method: "analyzeFile", args: [wsId, fileId, opts] }),
+    adviseOnFile: (wsId, fileId, question) => post("/rpc", { method: "adviseOnFile", args: [wsId, fileId, question] }),
+    analyzeFilesBatch: (wsId, fileIds, opts) => post("/rpc", { method: "analyzeFilesBatch", args: [wsId, fileIds, opts] }),
     cancelBatchAnalyze: async () => {
       await post("/rpc", { method: "cancelBatchAnalyze", args: [] })
     },
