@@ -41,7 +41,7 @@ export const LLM_PROVIDER_PRESETS: ProviderPresetMeta[] = [
   {
     provider: "openai_compatible",
     label: "Local / Custom OpenAI-Compatible (Ollama, LM Studio, vLLM, OpenRouter)",
-    defaultModel: "qwen2.5vl:7b",
+    defaultModel: "qwen3-vl:8b-instruct",
     defaultBaseUrl: "http://localhost:11434/v1",
     requiresApiKey: false,
     docsUrl: "https://github.com/ollama/ollama/blob/main/docs/openai.md"

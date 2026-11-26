@@ -80,6 +80,12 @@ export interface TTaxTransport {
   getLLMProviders: (workspaceId: string) => Promise<LLMProviderConfig[]>
   saveLLMProviders: (workspaceId: string, providers: LLMProviderConfig[]) => Promise<void>
   testLLMProvider: (config: LLMProviderConfig) => Promise<{ success: boolean; supportsVision: boolean; message: string }>
+  discoverOllamaModels?: (baseUrl?: string) => Promise<{
+    reachable: boolean
+    baseUrl: string
+    models: Array<{ name: string; isVision: boolean; sizeBytes: number; family?: string }>
+    bestVisionModel?: string
+  }>
 
   // Metadata
   listCategories: (workspaceId: string) => Promise<Array<Record<string, unknown>>>
@@ -412,6 +418,7 @@ export function createHttpTransport(baseUrl = "/api"): TTaxTransport {
     getLLMProviders: (wsId) => post("/rpc", { method: "getLLMProviders", args: [wsId] }),
     saveLLMProviders: (wsId, providers) => post("/rpc", { method: "saveLLMProviders", args: [wsId, providers] }),
     testLLMProvider: (config) => post("/rpc", { method: "testLLMProvider", args: [config] }),
+    discoverOllamaModels: (baseUrl) => post("/rpc", { method: "discoverOllamaModels", args: [baseUrl] }),
     listCategories: (wsId) => post("/rpc", { method: "listCategories", args: [wsId] }),
     upsertCategory: (wsId, d) => post("/rpc", { method: "upsertCategory", args: [wsId, d] }),
     deleteCategory: (wsId, id) => post("/rpc", { method: "deleteCategory", args: [wsId, id] }),

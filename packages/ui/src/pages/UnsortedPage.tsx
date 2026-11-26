@@ -205,6 +205,14 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
   const applyOutcomeToForm = useCallback(
     (outcome: DocumentAnalysisOutcome, filename: string) => {
       const f = outcome.extractedFields
+      const totalVal = Number(f.total ?? 0) || 0
+      const vatVal = Number(f.vatAmount ?? 0) || 0
+      const preTaxRaw = Number(f.preTaxAmount ?? 0) || 0
+      const isHandwritten = outcome.documentKind === "handwritten_bill" || outcome.documentKind === "printed_receipt"
+      const defaultVatRate =
+        outcome.parsedEInvoice?.vatBreakdown?.[0]?.vatRate ??
+        (vatVal === 0 && isHandwritten ? "KCT" : "10%")
+
       setForm({
         name: String(f.name ?? filename),
         merchant: String(f.merchant ?? ""),
@@ -214,19 +222,22 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
         invoiceNumber: String(f.invoiceNumber ?? ""),
         issuedAt: String(f.issuedAt ?? new Date().toISOString().slice(0, 10)),
         currencyCode: String(f.currencyCode ?? workspace.baseCurrency ?? "VND"),
-        preTaxAmount: Number(f.preTaxAmount ?? 0) || 0,
-        vatRateCode: String(f.vatRateCode ?? outcome.parsedEInvoice?.vatBreakdown?.[0]?.vatRate ?? "10%"),
-        vatAmount: Number(f.vatAmount ?? 0) || 0,
-        totalAmount: Number(f.total ?? 0) || 0,
+        preTaxAmount: preTaxRaw > 0 ? preTaxRaw : vatVal === 0 ? totalVal : Math.max(0, totalVal - vatVal),
+        vatRateCode: String(f.vatRateCode ?? defaultVatRate),
+        vatAmount: vatVal,
+        totalAmount: totalVal,
         categoryCode: String(f.categoryCode ?? "other"),
         projectCode: String(f.projectCode ?? "general"),
-        paymentMethod: String(f.paymentMethod ?? "Chuyển khoản"),
-        note: "",
+        paymentMethod: String(f.paymentMethod ?? (isHandwritten ? "Tiền mặt" : "Chuyển khoản")),
+        note: outcome.amountInWords ? `Bằng chữ: ${outcome.amountInWords}` : "",
         extra: {}
       })
+      if (outcome.detectedRotationDeg && outcome.detectedRotationDeg !== 0) {
+        setRotateDeg(outcome.detectedRotationDeg)
+      }
       setFxEstimate(null)
       setDebitAccountOverride("")
-      setShowAuditDetails(Boolean(outcome.auditIssues?.some((i) => i.severity === "error")))
+      setShowAuditDetails(Boolean(outcome.auditIssues?.some((i) => i.severity === "error" || i.code === "HANDWRITTEN_ARITHMETIC_MISMATCH")))
     },
     [workspace.baseCurrency]
   )
@@ -870,11 +881,22 @@ export function UnsortedPage({ workspace, onRefreshCounts, onToast }: UnsortedPr
       <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
-            <div className="text-[14px] font-semibold text-[var(--text)] truncate">{selectedFile?.filename}</div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[14px] font-semibold text-[var(--text)] truncate">{selectedFile?.filename}</span>
+              {analysis?.documentKind === "handwritten_bill" && (
+                <span className="tag tag-warn text-[10px]">HĐ viết tay</span>
+              )}
+              {analysis?.documentKind === "printed_receipt" && (
+                <span className="tag text-[10px]">Bill bán lẻ</span>
+              )}
+              {analysis?.detectedRotationDeg ? (
+                <span className="tag text-[10px]">Đã tự xoay {analysis.detectedRotationDeg}°</span>
+              ) : null}
+            </div>
             <div className="text-[11px] text-[var(--muted)]">
               {analysis
-                ? `Trích xuất: ${analysis.extractionMethod.toUpperCase()} · Tin cậy ${Math.round(analysis.confidence * 100)}%`
-                : "Bấm Bóc tách ngay để đọc XML hoặc gọi AI Vision"}
+                ? `Trích xuất: ${analysis.extractionMethod.toUpperCase()}${analysis.providerUsed ? ` (${analysis.providerUsed})` : ""} · Tin cậy ${Math.round(analysis.confidence * 100)}%`
+                : "Bấm Bóc tách ngay để đọc XML, gọi AI Vision hoặc OCR cục bộ"}
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">

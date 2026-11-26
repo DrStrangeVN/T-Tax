@@ -35,6 +35,7 @@ export function buildDesktopTransport(platform: "macos" | "windows" | "linux"): 
     getLLMProviders: (id) => b.rpc("getLLMProviders", id),
     saveLLMProviders: (id, p) => b.rpc("saveLLMProviders", id, p),
     testLLMProvider: (c) => b.rpc("testLLMProvider", c),
+    discoverOllamaModels: (baseUrl) => b.rpc("discoverOllamaModels", baseUrl),
     listCategories: (id) => b.rpc("listCategories", id),
     upsertCategory: (id, d) => b.rpc("upsertCategory", id, d),
     deleteCategory: (id, cid) => b.rpc("deleteCategory", id, cid),

@@ -601,6 +601,7 @@ export class TTaxService {
     const categoriesList = this.listCategories(workspaceId)
     const projectsList = this.listProjects(workspaceId)
     const accountsList = this.listAccounts(workspaceId, ws.accountingRegime as AccountingRegime)
+    const smartRulesList = this.listSmartRules(workspaceId)
 
     const existingKeys = new Set(
       this.db
@@ -622,6 +623,7 @@ export class TTaxService {
       categories: categoriesList,
       projects: projectsList,
       accounts: accountsList,
+      smartRules: smartRulesList,
       regime: ws.accountingRegime,
       promptTemplate: settingsMap.prompt_analyse_new_file,
       imageFormat: (settingsMap.llm_attachment_format as AttachmentImageFormat) || "webp",

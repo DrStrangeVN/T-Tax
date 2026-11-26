@@ -1,5 +1,12 @@
 import sharp from "sharp"
 import { createCanvas, type Canvas, type SKRSContext2D } from "@napi-rs/canvas"
+import { execFile } from "node:child_process"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { promisify } from "node:util"
+
+const execFileAsync = promisify(execFile)
 
 export type AttachmentImageFormat = "webp" | "png" | "jpeg"
 
@@ -14,6 +21,12 @@ export interface PdfInspectionResult {
   extractedText: string
   hasRichTextLayer: boolean
   pages: RenderedPage[]
+}
+
+export interface NormalizedImageResult {
+  mediaType: string
+  buffer: Buffer
+  rotatedDeg: number
 }
 
 class NodeCanvasFactory {
@@ -32,22 +45,120 @@ class NodeCanvasFactory {
   }
 }
 
+/**
+ * Uses local Tesseract OSD (`--psm 0`) to detect 90° / 180° / 270° rotated phone photos
+ * that lack EXIF orientation tags. Returns 0 silently if Tesseract is unavailable or uncertain.
+ */
+export async function detectImageOrientationDeg(buffer: Buffer): Promise<number> {
+  let dir: string | null = null
+  try {
+    const meta = await sharp(buffer, { failOn: "none" }).metadata()
+    if ((meta.width ?? 0) < 500 || (meta.height ?? 0) < 500) {
+      return 0
+    }
+    // Preserve detail for small receipts in phone frames while respecting EXIF orientation first
+    const probeBuf = await sharp(buffer, { failOn: "none" })
+      .rotate()
+      .resize({ width: 1800, height: 1800, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 88 })
+      .toBuffer()
+
+    dir = await mkdtemp(join(tmpdir(), "ttax-osd-"))
+    const imgPath = join(dir, "probe.jpg")
+    await writeFile(imgPath, probeBuf)
+
+    const { stdout, stderr } = await execFileAsync("tesseract", [imgPath, "stdout", "--psm", "0"], {
+      timeout: 6000,
+      maxBuffer: 1024 * 512
+    })
+    const combined = `${stdout}\n${stderr}`
+    const rotMatch = combined.match(/Rotate:\s*(\d+)/i)
+    const confMatch = combined.match(/Orientation confidence:\s*([\d.]+)/i)
+    const rot = rotMatch ? Number(rotMatch[1]) : 0
+    const conf = confMatch ? Number(confMatch[1]) : 0
+
+    // High-confidence threshold prevents false 180° flips on messy Vietnamese handwriting
+    if ((rot === 90 || rot === 180 || rot === 270) && conf >= 2.2) {
+      return rot
+    }
+    return 0
+  } catch {
+    return 0
+  } finally {
+    if (dir) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+/**
+ * Runs local offline Tesseract OCR (`vie+eng`, falling back to `eng`) on an image buffer.
+ * Returns empty string silently if Tesseract CLI is not installed on the host.
+ */
+export async function runLocalTesseractOcr(buffer: Buffer): Promise<string> {
+  let dir: string | null = null
+  try {
+    const cleanBuf = await sharp(buffer, { failOn: "none" })
+      .rotate()
+      .resize({ width: 1800, height: 1800, fit: "inside", withoutEnlargement: true })
+      .greyscale()
+      .normalise()
+      .sharpen({ sigma: 0.9 })
+      .png()
+      .toBuffer()
+
+    dir = await mkdtemp(join(tmpdir(), "ttax-ocr-"))
+    const imgPath = join(dir, "page.png")
+    await writeFile(imgPath, cleanBuf)
+
+    try {
+      const { stdout } = await execFileAsync("tesseract", [imgPath, "stdout", "-l", "vie+eng", "--psm", "6"], {
+        timeout: 15000,
+        maxBuffer: 1024 * 1024 * 4
+      })
+      return stdout.trim()
+    } catch {
+      const { stdout } = await execFileAsync("tesseract", [imgPath, "stdout", "-l", "eng", "--psm", "6"], {
+        timeout: 15000,
+        maxBuffer: 1024 * 1024 * 4
+      })
+      return stdout.trim()
+    }
+  } catch {
+    return ""
+  } finally {
+    if (dir) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
 export async function normalizeImageForLLM(
   buffer: Buffer,
   format: AttachmentImageFormat = "webp",
-  maxDimension = 1800
-): Promise<{ mediaType: string; buffer: Buffer }> {
-  const img = sharp(buffer, { failOn: "none" })
-    .rotate()
-    .resize({ width: maxDimension, height: maxDimension, fit: "inside", withoutEnlargement: true })
+  maxDimension = 1800,
+  options: { autoOrient?: boolean; enhanceHandwriting?: boolean } = {}
+): Promise<NormalizedImageResult> {
+  const rotatedDeg = options.autoOrient ? await detectImageOrientationDeg(buffer) : 0
+
+  let img = sharp(buffer, { failOn: "none" }).rotate()
+  if (rotatedDeg !== 0) {
+    img = img.rotate(rotatedDeg)
+  }
+  img = img.resize({ width: maxDimension, height: maxDimension, fit: "inside", withoutEnlargement: true })
+
+  if (options.enhanceHandwriting) {
+    // Gentle contrast stretch & ink sharpening that preserves pen color cues on carbon paper
+    img = img.normalise({ lower: 1, upper: 99 }).sharpen({ sigma: 0.85 })
+  }
 
   if (format === "png") {
-    return { mediaType: "image/png", buffer: await img.png({ compressionLevel: 8 }).toBuffer() }
+    return { mediaType: "image/png", buffer: await img.png({ compressionLevel: 8 }).toBuffer(), rotatedDeg }
   }
   if (format === "jpeg") {
-    return { mediaType: "image/jpeg", buffer: await img.jpeg({ quality: 86 }).toBuffer() }
+    return { mediaType: "image/jpeg", buffer: await img.jpeg({ quality: 88 }).toBuffer(), rotatedDeg }
   }
-  return { mediaType: "image/webp", buffer: await img.webp({ quality: 84 }).toBuffer() }
+  return { mediaType: "image/webp", buffer: await img.webp({ quality: 84 }).toBuffer(), rotatedDeg }
 }
 
 /**

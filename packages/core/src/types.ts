@@ -4,7 +4,8 @@ export type TransactionDirection = "input" | "output"
 export type TransactionType = "expense" | "income" | "transfer"
 export type PaymentStatus = "unpaid" | "paid" | "partial"
 export type ComplianceStatus = "valid" | "warning" | "error" | "pending"
-export type ExtractionMethod = "none" | "xml" | "pdf_text" | "vlm" | "hybrid"
+export type ExtractionMethod = "none" | "xml" | "pdf_text" | "vlm" | "hybrid" | "local_ocr"
+export type DocumentKind = "einvoice" | "handwritten_bill" | "printed_receipt"
 export type GlassIntensity = "clear" | "balanced" | "solid"
 export type SidebarMode = "expanded" | "rail" | "collapsed"
 export type ThemeMode = "dark" | "light" | "system"
@@ -101,7 +102,7 @@ export interface WorkspaceDTO {
 }
 
 export interface FieldProvenance {
-  source: "xml" | "pdf_text" | "vlm" | "manual" | "rule"
+  source: "xml" | "pdf_text" | "vlm" | "manual" | "rule" | "local_ocr"
   confidence: number
   warning?: string
 }
@@ -227,6 +228,12 @@ export interface AuditIssue {
     | "SELLER_MST_RISK"
     | "MISSING_MCCQT_FOR_CODED"
     | "LOW_OCR_CONFIDENCE"
+    | "HANDWRITTEN_NO_EINVOICE"
+    | "HANDWRITTEN_ARITHMETIC_MISMATCH"
+    | "AMOUNT_IN_WORDS_MISMATCH"
+    | "TOTAL_AUTO_SUMMED"
+    | "AUTO_ROTATED_IMAGE"
+    | "VND_THOUSANDS_NORMALIZED"
   severity: "error" | "warning" | "info"
   message: string
   field?: string

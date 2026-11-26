@@ -409,15 +409,56 @@ export function SettingsPage({
                         </label>
                         <span className="font-semibold text-[13px]">{preset?.label ?? cfg.provider}</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => testVision(cfg)}
-                        disabled={testingProvider === cfg.provider}
-                        className="gb"
-                      >
-                        <TestTube2 size={12.5} />
-                        <span>{testingProvider === cfg.provider ? "Đang test..." : "Test Vision"}</span>
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        {cfg.provider === "openai_compatible" && transport.discoverOllamaModels && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const res = await transport.discoverOllamaModels!(cfg.baseUrl || "http://127.0.0.1:11434")
+                                if (!res.reachable) {
+                                  onToast("Không tìm thấy Ollama đang chạy tại localhost:11434.", "warn")
+                                  return
+                                }
+                                if (res.bestVisionModel) {
+                                  const next = [...providers]
+                                  next[idx] = {
+                                    ...cfg,
+                                    enabled: true,
+                                    model: res.bestVisionModel,
+                                    baseUrl: res.baseUrl
+                                  }
+                                  setProviders(next)
+                                  onToast(
+                                    `Đã tìm thấy ${res.models.length} model Ollama — chọn Vision: ${res.bestVisionModel}. Bấm Lưu cấu hình AI.`,
+                                    "ok"
+                                  )
+                                } else {
+                                  onToast(
+                                    `Ollama đang chạy (${res.models.length} model) nhưng chưa có model Vision (khuyên dùng: ollama pull qwen3-vl:8b-instruct).`,
+                                    "warn"
+                                  )
+                                }
+                              } catch (err) {
+                                onToast(err instanceof Error ? err.message : "Lỗi quét Ollama", "err")
+                              }
+                            }}
+                            className="gb"
+                          >
+                            <Sparkles size={12.5} />
+                            <span>Quét Ollama cục bộ</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => testVision(cfg)}
+                          disabled={testingProvider === cfg.provider}
+                          className="gb"
+                        >
+                          <TestTube2 size={12.5} />
+                          <span>{testingProvider === cfg.provider ? "Đang test..." : "Test Vision"}</span>
+                        </button>
+                      </div>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <input

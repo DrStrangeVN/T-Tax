@@ -236,6 +236,9 @@ test("T-Tax macOS Desktop E2E: Liquid Glass UI, Shortcuts, XML Ingest, Approval 
     await expect(page.locator("text=Thông tin Pháp nhân & Chế độ Kế toán")).toBeVisible({ timeout: 10_000 })
     await expect(page.locator("text=Khóa sổ Kỳ kế toán").first()).toBeVisible({ timeout: 5_000 })
     await page.screenshot({ path: join(shotDir, "10-settings.png") })
+    await page.click('button:has-text("AI & Prompt")')
+    await expect(page.locator('button:has-text("Quét Ollama cục bộ")').first()).toBeVisible({ timeout: 5_000 })
+    await page.screenshot({ path: join(shotDir, "10b-settings-ai.png") })
 
     // 11. Toggle Light Mode & verify clean Light Liquid Glass
     await page.click('[title="Đổi Sáng / Tối"]')

@@ -6,6 +6,7 @@ import { readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import {
   authenticateGdtSession,
+  discoverLocalOllamaModels,
   downloadGdtInvoiceXmlZip,
   fetchGdtCaptcha,
   getHistoricalExchangeRate,
@@ -146,6 +147,8 @@ export function registerIpcHandlers(params: {
       }
       case "testLLMProvider":
         return testProviderVisionSupport(args[0] as LLMProviderConfig)
+      case "discoverOllamaModels":
+        return discoverLocalOllamaModels(args[0] as string | undefined)
 
       case "listCategories":
         return service.listCategories(args[0] as string)

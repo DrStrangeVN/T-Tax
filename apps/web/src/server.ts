@@ -8,6 +8,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
   authenticateGdtSession,
+  discoverLocalOllamaModels,
   downloadGdtInvoiceXmlZip,
   fetchGdtCaptcha,
   getHistoricalExchangeRate,
@@ -119,6 +120,8 @@ app.post("/api/rpc", async (c) => {
       }
       case "testLLMProvider":
         return c.json(await testProviderVisionSupport(args[0] as LLMProviderConfig))
+      case "discoverOllamaModels":
+        return c.json(await discoverLocalOllamaModels(args[0] as string | undefined))
       case "listCategories":
         return c.json(service.listCategories(args[0] as string))
       case "upsertCategory":
